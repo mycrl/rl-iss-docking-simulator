@@ -30,6 +30,7 @@ Then fill in the CSS selectors in ``docking/browser.py`` and run this script.
 """
 
 import argparse
+import importlib.util
 import logging
 import os
 
@@ -41,6 +42,17 @@ from docking import IssDockingEnv
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _get_tensorboard_log_dir() -> str | None:
+    """Return TensorBoard log directory when tensorboard is available."""
+    if importlib.util.find_spec("tensorboard") is None:
+        logger.warning(
+            "tensorboard is not installed; disabling TensorBoard logging. "
+            "Install it with: pip install tensorboard"
+        )
+        return None
+    return "./logs/"
 
 
 def train(
@@ -104,7 +116,7 @@ def train(
             target_update_interval=1_000,
             exploration_fraction=0.1,
             exploration_final_eps=0.05,
-            tensorboard_log="./logs/",
+            tensorboard_log=_get_tensorboard_log_dir(),
         )
 
     os.makedirs(checkpoint_dir, exist_ok=True)

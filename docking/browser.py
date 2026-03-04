@@ -133,6 +133,7 @@ class SimulatorBrowser:
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._page: Optional[Page] = None
+        self._skip_next_reset_reload: bool = False
 
     # ------------------------------------------------------------------
     # Connection management
@@ -159,7 +160,8 @@ class SimulatorBrowser:
                 wait_until="networkidle",
                 timeout=int(self._page_load_timeout * 1_000),
             )
-            self._wait_for_user_start()
+            self._skip_next_reset_reload = True
+            self._ensure_simulator_started()
             logger.info("Launched browser and navigated to %s", self.SIMULATOR_URL)
         else:
             self._browser = self._playwright.chromium.connect_over_cdp(self._cdp_url)
@@ -212,12 +214,15 @@ class SimulatorBrowser:
             the simulator's initialisation animation can complete.
         """
         self._require_page()
-        self._page.reload(
-            wait_until="networkidle",
-            timeout=int(self._page_load_timeout * 1_000),
-        )
+        if self._skip_next_reset_reload:
+            self._skip_next_reset_reload = False
+        else:
+            self._page.reload(
+                wait_until="networkidle",
+                timeout=int(self._page_load_timeout * 1_000),
+            )
         time.sleep(wait)
-        self._wait_for_user_start()
+        self._ensure_simulator_started()
 
     # ------------------------------------------------------------------
     # Actions & observations
@@ -327,6 +332,41 @@ class SimulatorBrowser:
             if answer == "y":
                 break
             print("Please type 'y' and press Enter to continue.")
+
+    def _try_click_start(self) -> bool:
+        """Try to click a START control automatically.
+
+        Returns ``True`` when a likely START element is found and clicked,
+        otherwise returns ``False``.
+        """
+        self._require_page()
+        candidates = [
+            lambda: self._page.locator("button:has-text('START')").first,
+            lambda: self._page.get_by_text("START", exact=False).first,
+            lambda: self._page.locator("text=START").first,
+        ]
+        for get_locator in candidates:
+            try:
+                locator = get_locator()
+                if locator.count() > 0:
+                    locator.click(timeout=1_500)
+                    logger.info("Simulator START clicked automatically.")
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _ensure_simulator_started(self) -> None:
+        """Ensure simulator has passed the START screen.
+
+        First attempts to click START automatically. If that fails and the
+        browser is visible, falls back to manual confirmation.
+        """
+        if self._try_click_start():
+            return
+
+        if self._launch and not self._headless:
+            self._wait_for_user_start()
 
     def _require_page(self) -> None:
         """Raise :class:`RuntimeError` if not yet connected."""
