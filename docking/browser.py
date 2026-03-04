@@ -1,15 +1,26 @@
 """
 Browser automation layer for the SpaceX ISS Docking Simulator.
 
-Connects to an already-opened Chrome browser via the Chrome DevTools Protocol
-(CDP) and provides methods to read simulator state and trigger control actions.
+Supports two operating modes:
 
-To use this module, start Chrome with remote debugging enabled::
+**Managed mode** (``launch=True``)
+    Playwright launches its own Chromium browser, navigates to the simulator
+    URL, and manages the full browser lifecycle.  No manual Chrome startup is
+    required::
 
-    google-chrome --remote-debugging-port=9222 https://iss-sim.spacex.com/
+        browser = SimulatorBrowser(launch=True)
+        browser.connect()
 
-Then instantiate :class:`SimulatorBrowser`, call :meth:`connect`, and use
-:meth:`read_state` / :meth:`click_action` to interact with the page.
+**CDP mode** (default, ``launch=False``)
+    Playwright connects to an already-opened Chrome instance via the Chrome
+    DevTools Protocol.  Start Chrome manually first::
+
+        google-chrome --remote-debugging-port=9222 https://iss-sim.spacex.com/
+
+    Then::
+
+        browser = SimulatorBrowser()   # or SimulatorBrowser(cdp_url="http://localhost:9222")
+        browser.connect()
 
 .. note::
     The CSS selectors in :attr:`SimulatorBrowser.BUTTON_SELECTORS` and
@@ -29,15 +40,32 @@ logger = logging.getLogger(__name__)
 
 class SimulatorBrowser:
     """
-    Controls the SpaceX ISS Docking Simulator via Chrome DevTools Protocol.
+    Controls the SpaceX ISS Docking Simulator via Playwright.
+
+    Two modes are supported — select via the *launch* constructor parameter:
+
+    * **Managed mode** (``launch=True``): Playwright starts its own Chromium
+      browser, navigates to :attr:`SIMULATOR_URL`, and owns the lifecycle.
+      The browser is closed when :meth:`disconnect` is called.
+    * **CDP mode** (``launch=False``, default): Playwright connects to an
+      already-running Chrome instance via the Chrome DevTools Protocol endpoint
+      at *cdp_url*.
 
     Parameters
     ----------
+    launch:
+        When ``True``, launch a new browser automatically.
+        When ``False`` (default), connect to an existing browser via CDP.
+    headless:
+        Only used when ``launch=True``.  If ``True``, the browser runs without
+        a visible window (headless).  Defaults to ``False`` so the simulator
+        UI is visible during training.
     cdp_url:
-        URL of the Chrome remote-debugging endpoint
-        (default: ``http://localhost:9222``).
+        URL of the Chrome remote-debugging endpoint used in CDP mode
+        (default: ``http://localhost:9222``).  Ignored when ``launch=True``.
     page_load_timeout:
-        Seconds to wait for a page reload before raising a timeout error.
+        Seconds to wait for the simulator page to load before raising a
+        timeout error.
     """
 
     CDP_URL: str = "http://localhost:9222"
@@ -82,9 +110,13 @@ class SimulatorBrowser:
 
     def __init__(
         self,
+        launch: bool = False,
+        headless: bool = False,
         cdp_url: str = CDP_URL,
         page_load_timeout: float = 30.0,
     ) -> None:
+        self._launch = launch
+        self._headless = headless
         self._cdp_url = cdp_url
         self._page_load_timeout = page_load_timeout
         self._playwright = None
@@ -96,33 +128,53 @@ class SimulatorBrowser:
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
-        """Connect to an already-opened Chrome instance via CDP."""
+        """Connect to the simulator.
+
+        In **managed mode** (``launch=True``), Playwright launches a new
+        Chromium browser and navigates directly to :attr:`SIMULATOR_URL`.
+
+        In **CDP mode** (``launch=False``, default), Playwright connects to an
+        already-running Chrome instance via the DevTools Protocol endpoint
+        specified by ``cdp_url``.
+        """
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.connect_over_cdp(self._cdp_url)
 
-        contexts = self._browser.contexts
-        if not contexts:
-            raise RuntimeError(
-                "No browser contexts found. "
-                f"Open the simulator at {self.SIMULATOR_URL} first."
+        if self._launch:
+            self._browser = self._playwright.chromium.launch(headless=self._headless)
+            context = self._browser.new_context()
+            self._page = context.new_page()
+            self._page.goto(
+                self.SIMULATOR_URL,
+                wait_until="networkidle",
+                timeout=int(self._page_load_timeout * 1_000),
             )
-
-        pages = contexts[0].pages
-        if not pages:
-            raise RuntimeError("No open pages found in the browser context.")
-
-        # Prefer the simulator page; fall back to the first available page.
-        self._page = next(
-            (p for p in pages if self.SIMULATOR_URL in p.url),
-            pages[0],
-        )
-
-        if self.SIMULATOR_URL not in self._page.url:
-            logger.warning(
-                "Simulator page not found; using page: %s", self._page.url
-            )
+            logger.info("Launched browser and navigated to %s", self.SIMULATOR_URL)
         else:
-            logger.info("Connected to simulator page: %s", self._page.url)
+            self._browser = self._playwright.chromium.connect_over_cdp(self._cdp_url)
+
+            contexts = self._browser.contexts
+            if not contexts:
+                raise RuntimeError(
+                    "No browser contexts found. "
+                    f"Open the simulator at {self.SIMULATOR_URL} first."
+                )
+
+            pages = contexts[0].pages
+            if not pages:
+                raise RuntimeError("No open pages found in the browser context.")
+
+            # Prefer the simulator page; fall back to the first available page.
+            self._page = next(
+                (p for p in pages if self.SIMULATOR_URL in p.url),
+                pages[0],
+            )
+
+            if self.SIMULATOR_URL not in self._page.url:
+                logger.warning(
+                    "Simulator page not found; using page: %s", self._page.url
+                )
+            else:
+                logger.info("Connected to simulator page: %s", self._page.url)
 
     def disconnect(self) -> None:
         """Close the CDP connection and release Playwright resources."""

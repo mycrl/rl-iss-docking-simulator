@@ -85,9 +85,9 @@ playwright install chromium
 
 ### 1 — Configure CSS selectors
 
-Open Chrome, navigate to the simulator, and press **F12** to open DevTools.
-Use the Elements inspector to find the CSS selectors for each control button
-and state readout, then fill them in `docking/browser.py`:
+Open the simulator in a browser, press **F12** to open DevTools, and use the
+Elements inspector to find the CSS selectors for each control button and state
+readout.  Fill them in `docking/browser.py`:
 
 ```python
 BUTTON_SELECTORS = {
@@ -101,7 +101,23 @@ STATE_SELECTORS = {
 }
 ```
 
-### 2 — Launch Chrome with remote debugging
+### 2 — Choose a browser mode
+
+There are two ways to connect to the simulator:
+
+**Option A — Managed mode (Playwright launches the browser)**
+
+Pass `--launch-browser` to any script.  Playwright starts a Chromium browser,
+navigates to the simulator automatically, and closes it on exit.  No manual
+Chrome setup is needed:
+
+```bash
+python train.py --launch-browser
+```
+
+**Option B — CDP mode (connect to a manually-opened Chrome)**
+
+Start Chrome with remote debugging enabled and navigate to the simulator:
 
 ```bash
 google-chrome --remote-debugging-port=9222 https://iss-sim.spacex.com/
@@ -114,11 +130,21 @@ On macOS:
     --remote-debugging-port=9222 https://iss-sim.spacex.com/
 ```
 
+Then run the scripts without `--launch-browser` (the default):
+
+```bash
+python train.py
+```
+
 ## Usage
 
 ### Train
 
 ```bash
+# Managed mode — browser launched automatically
+python train.py --launch-browser
+
+# CDP mode — connect to a manually-opened Chrome (default)
 python train.py
 ```
 
@@ -126,21 +152,27 @@ Optional arguments:
 
 | Argument | Default | Description |
 |---|---|---|
+| `--launch-browser` | *(flag)* | Let Playwright launch Chromium automatically |
+| `--headless` | *(flag)* | Run browser without a visible window (with `--launch-browser`) |
 | `--timesteps` | 500 000 | Total training timesteps |
 | `--model-path` | `models/dqn_docking` | Where to save the model |
 | `--resume` | *(flag)* | Continue from an existing model |
 | `--checkpoint-freq` | 10 000 | Steps between checkpoint saves |
 | `--checkpoint-dir` | `checkpoints` | Directory for checkpoint files |
 
-Example — resume a previous run:
+Example — resume a previous run in managed mode:
 
 ```bash
-python train.py --resume --model-path models/dqn_docking --timesteps 1000000
+python train.py --launch-browser --resume --model-path models/dqn_docking --timesteps 1000000
 ```
 
 ### Evaluate
 
 ```bash
+# Managed mode
+python evaluate.py --launch-browser --model models/dqn_docking --episodes 10
+
+# CDP mode
 python evaluate.py --model models/dqn_docking --episodes 10
 ```
 
@@ -148,6 +180,8 @@ Optional arguments:
 
 | Argument | Default | Description |
 |---|---|---|
+| `--launch-browser` | *(flag)* | Let Playwright launch Chromium automatically |
+| `--headless` | *(flag)* | Run browser without a visible window (with `--launch-browser`) |
 | `--model` | `models/dqn_docking` | Path to trained model |
 | `--episodes` | 10 | Number of evaluation episodes |
 

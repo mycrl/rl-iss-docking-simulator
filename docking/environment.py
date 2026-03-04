@@ -58,9 +58,17 @@ class IssDockingEnv(gym.Env):
 
     Parameters
     ----------
+    launch_browser:
+        When ``True``, Playwright launches a Chromium browser automatically
+        and navigates to the simulator URL.  When ``False`` (default),
+        Playwright connects to an already-running Chrome instance via CDP.
+    headless:
+        Only used when ``launch_browser=True``.  Set to ``True`` to run the
+        browser without a visible window (headless mode).
     cdp_url:
-        Chrome DevTools Protocol endpoint URL.  Pass a custom value if Chrome
-        is not listening on the default port (9222).
+        Chrome DevTools Protocol endpoint URL used in CDP mode.  Pass a custom
+        value if Chrome is not listening on the default port (9222).
+        Ignored when ``launch_browser=True``.
     step_delay:
         Seconds to wait after each button press before reading the new state.
         Longer delays give the simulator physics more time to settle.
@@ -114,6 +122,8 @@ class IssDockingEnv(gym.Env):
 
     def __init__(
         self,
+        launch_browser: bool = False,
+        headless: bool = False,
         cdp_url: str = SimulatorBrowser.CDP_URL,
         step_delay: float = 0.5,
         reset_wait: float = 5.0,
@@ -127,7 +137,11 @@ class IssDockingEnv(gym.Env):
         self.max_steps = max_steps
         self.render_mode = render_mode
 
-        self._browser = SimulatorBrowser(cdp_url=cdp_url)
+        self._browser = SimulatorBrowser(
+            launch=launch_browser,
+            headless=headless,
+            cdp_url=cdp_url,
+        )
         self._browser.connect()
 
         self.action_space = spaces.Discrete(len(self.ACTIONS))

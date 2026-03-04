@@ -6,10 +6,14 @@ Simulator in deterministic mode, then prints per-episode and aggregate stats.
 
 Usage
 -----
+    # Auto-launch the browser (managed mode)
+    python evaluate.py --launch-browser --model models/dqn_docking --episodes 10
+
+    # Connect to a manually-opened Chrome instance (CDP mode, default)
     python evaluate.py --model models/dqn_docking --episodes 10
 
-Before running, make sure the simulator is open in Chrome with remote
-debugging enabled (see ``docking/browser.py`` for instructions).
+In CDP mode, make sure the simulator is open in Chrome with remote debugging
+enabled (see ``docking/browser.py`` for instructions).
 """
 
 import argparse
@@ -24,7 +28,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def evaluate(model_path: str, n_episodes: int) -> None:
+def evaluate(
+    model_path: str,
+    n_episodes: int,
+    launch_browser: bool,
+    headless: bool,
+) -> None:
     """Run deterministic evaluation episodes and print a summary.
 
     Parameters
@@ -33,8 +42,14 @@ def evaluate(model_path: str, n_episodes: int) -> None:
         Path to the saved DQN model (with or without the ``.zip`` extension).
     n_episodes:
         Number of episodes to evaluate.
+    launch_browser:
+        If ``True``, Playwright launches a Chromium browser automatically.
+        If ``False``, connect to an already-running Chrome via CDP.
+    headless:
+        Only used when ``launch_browser=True``.  Run the browser without a
+        visible window when ``True``.
     """
-    env = IssDockingEnv()
+    env = IssDockingEnv(launch_browser=launch_browser, headless=headless)
     model = DQN.load(model_path, env=env)
 
     episode_rewards: list[float] = []
@@ -87,9 +102,27 @@ def main() -> None:
         default=10,
         help="Number of evaluation episodes to run.",
     )
+    parser.add_argument(
+        "--launch-browser",
+        action="store_true",
+        help=(
+            "Let Playwright launch a Chromium browser automatically. "
+            "When omitted, connect to an already-running Chrome via CDP."
+        ),
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run the browser without a visible window (only used with --launch-browser).",
+    )
     args = parser.parse_args()
 
-    evaluate(model_path=args.model, n_episodes=args.episodes)
+    evaluate(
+        model_path=args.model,
+        n_episodes=args.episodes,
+        launch_browser=args.launch_browser,
+        headless=args.headless,
+    )
 
 
 if __name__ == "__main__":

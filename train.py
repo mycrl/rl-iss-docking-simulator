@@ -10,16 +10,19 @@ and the ``--resume`` flag lets you continue training from a previous run.
 
 Usage
 -----
-    # Start fresh
+    # Auto-launch the browser (managed mode)
+    python train.py --launch-browser
+
+    # Connect to a manually-opened Chrome instance (CDP mode, default)
     python train.py
 
     # Resume from the latest saved model and replay buffer
-    python train.py --resume --model-path models/dqn_docking
+    python train.py --launch-browser --resume --model-path models/dqn_docking
 
     # Customise training length and checkpoint frequency
-    python train.py --timesteps 1000000 --checkpoint-freq 20000
+    python train.py --launch-browser --timesteps 1000000 --checkpoint-freq 20000
 
-Before running, start Chrome with remote debugging enabled::
+In CDP mode, start Chrome with remote debugging enabled before running::
 
     google-chrome --remote-debugging-port=9222 https://iss-sim.spacex.com/
 
@@ -46,6 +49,8 @@ def train(
     resume: bool,
     checkpoint_freq: int,
     checkpoint_dir: str,
+    launch_browser: bool,
+    headless: bool,
 ) -> None:
     """Train a DQN agent on the ISS docking environment.
 
@@ -62,8 +67,14 @@ def train(
         Save an intermediate checkpoint every this many steps.
     checkpoint_dir:
         Directory in which checkpoint files are stored.
+    launch_browser:
+        If ``True``, Playwright launches a Chromium browser automatically.
+        If ``False``, connect to an already-running Chrome via CDP.
+    headless:
+        Only used when ``launch_browser=True``.  Run the browser without a
+        visible window when ``True``.
     """
-    env = Monitor(IssDockingEnv())
+    env = Monitor(IssDockingEnv(launch_browser=launch_browser, headless=headless))
 
     # SB3's save_replay_buffer appends ".pkl" automatically; use the base path
     # everywhere and check for the ".pkl" file on disk when resuming.
@@ -152,6 +163,19 @@ def main() -> None:
         default="checkpoints",
         help="Directory for periodic checkpoint files.",
     )
+    parser.add_argument(
+        "--launch-browser",
+        action="store_true",
+        help=(
+            "Let Playwright launch a Chromium browser automatically. "
+            "When omitted, connect to an already-running Chrome via CDP."
+        ),
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run the browser without a visible window (only used with --launch-browser).",
+    )
     args = parser.parse_args()
 
     train(
@@ -160,6 +184,8 @@ def main() -> None:
         resume=args.resume,
         checkpoint_freq=args.checkpoint_freq,
         checkpoint_dir=args.checkpoint_dir,
+        launch_browser=args.launch_browser,
+        headless=args.headless,
     )
 
 
