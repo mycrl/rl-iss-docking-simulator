@@ -47,6 +47,7 @@ adaptive control authority to reduce over-control in high-inertia dynamics).
 - Position trend shaping for `|x|+|y|+|z|` (worsening penalized more than improvement rewarded)
 - Angular-rate damping penalty and danger-zone penalties (`|rate| > 0.2`, angular-rate danger > 0.5)
 - Control smoothness penalties + small observation patience reward
+- Learned button→state effect map used for high-risk action guidance
 - `−0.01` per-step time penalty
 
 ### Algorithm
@@ -148,11 +149,26 @@ Optional arguments:
 | `--control-interval-steps` | 2 | Base interval between real control clicks |
 | `--action-confirmation-steps` | 2 | Consecutive same-intent steps required before click (non-high-risk) |
 | `--adaptive-control` / `--no-adaptive-control` | enabled | Enable/disable risk-adaptive control authority |
+| `--effect-guidance` / `--no-effect-guidance` | enabled | Enable/disable learned action-effect guidance |
+| `--effect-export-freq` | 5000 | Export learned action-effect summary every N timesteps |
+| `--effect-export-dir` | `analysis/effects` | Directory for action-effect JSON exports |
 
 Example — resume a previous run in managed mode:
 
 ```bash
 python train.py --launch-browser --resume --model-path models/sac_docking --timesteps 1000000
+```
+
+### Stop training safely (without losing progress)
+
+You can stop training any time with `Ctrl+C`.
+
+- On interrupt, the script now catches `KeyboardInterrupt`.
+- It automatically saves both model and replay buffer before exiting.
+- Resume later with:
+
+```bash
+python train.py --launch-browser --resume --model-path models/sac_docking
 ```
 
 ### Evaluate
@@ -173,6 +189,25 @@ Optional arguments:
 | `--headless` | *(flag)* | Run browser without a visible window (with `--launch-browser`) |
 | `--model` | `models/sac_docking` | Path to trained model |
 | `--episodes` | 10 | Number of evaluation episodes |
+
+### Visualize learned action effects
+
+Training now periodically exports learned button→state influence summaries as JSON.
+
+- Latest snapshot: `analysis/effects/action_effects_latest.json`
+- Historical snapshots: `analysis/effects/action_effects_step_<timesteps>.json`
+
+Generate a heatmap + sample-count chart:
+
+```bash
+python plot_action_effects.py --input analysis/effects/action_effects_latest.json
+```
+
+Custom output path:
+
+```bash
+python plot_action_effects.py --input analysis/effects/action_effects_latest.json --output analysis/effects/action_effects.png
+```
 
 ## License
 

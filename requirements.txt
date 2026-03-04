@@ -3,3 +3,4 @@ stable-baselines3>=2.0.0
 numpy>=1.24.0
 playwright>=1.40.0
 tensorboard>=2.14.0
+matplotlib>=3.8.0

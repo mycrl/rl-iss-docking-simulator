@@ -70,6 +70,7 @@ Each step the agent receives:
 
 import logging
 import time
+from typing import Any
 
 import numpy as np
 import gymnasium as gym
@@ -194,6 +195,7 @@ class IssDockingEnv(gym.Env):
     WARNING_PENALTY: float = 0.05
     # Penalty scale for angular-rate damping reward term.
     ANGULAR_RATE_DAMPING_PENALTY: float = 0.12
+    ANGULAR_RATE_DAMPING_QUADRATIC_PENALTY: float = 0.4
     # Explicit danger-zone threshold for angular rates (deg/s).
     ANGULAR_RATE_DANGER_THRESHOLD: float = 0.5
     ANGULAR_RATE_DANGER_PENALTY: float = 0.08
@@ -202,7 +204,28 @@ class IssDockingEnv(gym.Env):
     REWARD_ANGULAR_RATE_REDZONE: float = -50.0
     # Approach-rate danger zone threshold (m/s, absolute value).
     RATE_DANGER_THRESHOLD: float = 0.2
-    RATE_DANGER_PENALTY: float = 0.08
+    RATE_DANGER_PENALTY: float = 0.2
+
+    # Speed-vs-distance conflict handling: avoid reducing range by excessive
+    # closing speed. A dynamic safe closing rate is derived from range.
+    AGGRESSIVE_CLOSING_PENALTY: float = 6.0
+    MOVING_AWAY_RATE_PENALTY: float = 0.8
+
+    # Global divergence penalty: whenever any metric moves farther from zero,
+    # apply a penalty that grows with divergence magnitude.
+    DIVERGENCE_LINEAR_PENALTY: float = 3.2
+    DIVERGENCE_QUADRATIC_PENALTY: float = 8.0
+
+    # Explicit progress reward: if total error decreases vs previous step,
+    # reward the improvement even when still far from the target state.
+    STEP_IMPROVEMENT_REWARD_SCALE: float = 1.5
+    # Absolute distance-to-target penalty (always on): farther from target
+    # incurs heavier penalties regardless of short-term improvement.
+    ABSOLUTE_ERROR_LINEAR_PENALTY: float = 0.35
+    ABSOLUTE_ERROR_QUADRATIC_PENALTY: float = 0.08
+    # Improvement reward can offset only part of absolute-error penalty to
+    # avoid conflict with "farther means harsher penalty" objective.
+    IMPROVEMENT_REWARD_MAX_RATIO: float = 0.35
 
     # Control smoothness penalties.
     ACTUATION_PENALTY: float = 0.005
@@ -231,6 +254,11 @@ class IssDockingEnv(gym.Env):
     HIGH_AUTH_ANGULAR_RATE: float = ANGULAR_RATE_DANGER_THRESHOLD
     HIGH_AUTH_CLOSING_RATE: float = 0.15
 
+    # Online action-effect estimation.
+    # Tracks average delta(observation) per executed button.
+    MIN_EFFECT_SAMPLES_FOR_CONFIDENCE: int = 20
+    EFFECT_GUIDANCE_MARGIN: float = 0.01
+
     def __init__(
         self,
         launch_browser: bool = False,
@@ -241,6 +269,7 @@ class IssDockingEnv(gym.Env):
         control_interval_steps: int = DEFAULT_CONTROL_INTERVAL_STEPS,
         action_confirmation_steps: int = DEFAULT_ACTION_CONFIRMATION_STEPS,
         adaptive_control: bool = True,
+        effect_guidance: bool = True,
         max_steps: int = 3000,
         render_mode=None,
     ) -> None:
@@ -251,6 +280,7 @@ class IssDockingEnv(gym.Env):
         self.control_interval_steps = max(1, int(control_interval_steps))
         self.action_confirmation_steps = max(1, int(action_confirmation_steps))
         self.adaptive_control = adaptive_control
+        self.effect_guidance = effect_guidance
         self.max_steps = max_steps
         self.render_mode = render_mode
 
@@ -277,11 +307,20 @@ class IssDockingEnv(gym.Env):
         self._prev_error: float = 0.0
         self._prev_range: float = 0.0
         self._prev_position_error: float = 0.0
+        self._prev_abs_norm_obs: np.ndarray = np.zeros_like(self.OBS_HIGH)
         self._last_executed_action: int | None = None
         self._last_state: dict[str, float] | None = None
         self._steps_since_action: int = 0
         self._pending_button_index: int | None = None
         self._pending_button_count: int = 0
+        self._action_effect_sum: np.ndarray = np.zeros(
+            (len(self.BUTTON_ACTIONS), len(self.OBS_KEYS)),
+            dtype=np.float32,
+        )
+        self._action_effect_count: np.ndarray = np.zeros(
+            len(self.BUTTON_ACTIONS),
+            dtype=np.int32,
+        )
         # Pre-compute the observation keys used for warning detection (all
         # keys except "range", which has its own approach-reward logic).
         self._warning_keys: list[str] = [k for k in self.OBS_KEYS if k != "range"]
@@ -300,6 +339,7 @@ class IssDockingEnv(gym.Env):
         self._prev_error = self._total_error(obs)
         self._prev_range = state["range"]
         self._prev_position_error = self._position_error(state)
+        self._prev_abs_norm_obs = np.abs(obs) / self.OBS_HIGH
         self._last_executed_action = None
         self._last_state = state
         self._steps_since_action = self._control_interval_for_state(state) - 1
@@ -324,6 +364,14 @@ class IssDockingEnv(gym.Env):
         current_state_for_control = self._last_state or {
             key: 0.0 for key in self.OBS_KEYS
         }
+        guided_override = False
+        if button_index is not None:
+            guided_button_index = self._guided_button_override(
+                base_button_index=button_index,
+                state=current_state_for_control,
+            )
+            guided_override = guided_button_index != button_index
+            button_index = guided_button_index
         high_authority_state = self._is_high_authority_state(current_state_for_control)
         dynamic_control_interval = self._control_interval_for_state(current_state_for_control)
         required_confirmation_steps = 1 if high_authority_state else self.action_confirmation_steps
@@ -357,6 +405,7 @@ class IssDockingEnv(gym.Env):
 
         obs = self._get_obs()
         state = self._obs_to_dict(obs)
+        prev_state_for_effect = current_state_for_control
         error = self._total_error(obs)
 
         terminated = False
@@ -374,6 +423,23 @@ class IssDockingEnv(gym.Env):
         range_reward = range_decrease * (
             self.RANGE_REWARD_SCALE if range_decrease >= 0 else self.RANGE_PENALTY_SCALE
         )
+
+        # Conflict handling (distance vs speed):
+        # - rate < 0 means closing in; too negative near target is dangerous.
+        # - rate > 0 means moving away from target.
+        closing_speed = max(-state["rate"], 0.0)
+        moving_away_speed = max(state["rate"], 0.0)
+        safe_closing_rate = min(
+            self.MAX_SAFE_RATE,
+            0.03 + 0.02 * np.sqrt(max(current_range, 0.0)),
+        )
+        overspeed = max(closing_speed - safe_closing_rate, 0.0)
+
+        # If range is decreasing but by unsafe aggressive closing, suppress
+        # range reward and replace with explicit penalty.
+        if range_decrease > 0 and overspeed > 0:
+            range_reward = 0.0
+
         current_position_error = self._position_error(state)
         position_decrease = self._prev_position_error - current_position_error
         position_reward = (
@@ -391,6 +457,25 @@ class IssDockingEnv(gym.Env):
             - n_warnings * self.WARNING_PENALTY
         )
 
+        absolute_error_penalty = (
+            self.ABSOLUTE_ERROR_LINEAR_PENALTY * error
+            + self.ABSOLUTE_ERROR_QUADRATIC_PENALTY * (error ** 2)
+        )
+        reward -= absolute_error_penalty
+
+        # Positive progress credit: shrinking total error from the previous
+        # step is always rewarded, regardless of remaining distance to target.
+        error_improvement = max(self._prev_error - error, 0.0)
+        raw_improvement_reward = self.STEP_IMPROVEMENT_REWARD_SCALE * error_improvement
+        improvement_reward_cap = absolute_error_penalty * self.IMPROVEMENT_REWARD_MAX_RATIO
+        improvement_reward = min(raw_improvement_reward, improvement_reward_cap)
+        reward += improvement_reward
+
+        aggressive_closing_penalty = self.AGGRESSIVE_CLOSING_PENALTY * (overspeed ** 2)
+        moving_away_penalty = self.MOVING_AWAY_RATE_PENALTY * moving_away_speed
+        reward -= aggressive_closing_penalty
+        reward -= moving_away_penalty
+
         # Active rotational damping: penalise high angular rates.
         # Normalise by OBS_HIGH entries for roll_rate/yaw_rate/pitch_rate.
         angular_rate_penalty = (
@@ -398,7 +483,28 @@ class IssDockingEnv(gym.Env):
             + abs(state["yaw_rate"]) / self.OBS_HIGH[7]
             + abs(state["pitch_rate"]) / self.OBS_HIGH[10]
         )
+        angular_rate_quadratic_penalty = (
+            (abs(state["roll_rate"]) / self.OBS_HIGH[4]) ** 2
+            + (abs(state["yaw_rate"]) / self.OBS_HIGH[7]) ** 2
+            + (abs(state["pitch_rate"]) / self.OBS_HIGH[10]) ** 2
+        )
         reward -= self.ANGULAR_RATE_DAMPING_PENALTY * angular_rate_penalty
+        reward -= (
+            self.ANGULAR_RATE_DAMPING_QUADRATIC_PENALTY
+            * angular_rate_quadratic_penalty
+        )
+
+        # Global divergence penalty: any dimension moving farther from target
+        # (zero) is penalised; larger drift incurs disproportionately higher cost.
+        current_abs_norm_obs = np.abs(obs) / self.OBS_HIGH
+        divergence = np.maximum(current_abs_norm_obs - self._prev_abs_norm_obs, 0.0)
+        divergence_sum = float(np.sum(divergence))
+        divergence_sq_sum = float(np.sum(np.square(divergence)))
+        divergence_penalty = (
+            self.DIVERGENCE_LINEAR_PENALTY * divergence_sum
+            + self.DIVERGENCE_QUADRATIC_PENALTY * divergence_sq_sum
+        )
+        reward -= divergence_penalty
 
         angular_rate_danger_count = sum(
             1
@@ -425,12 +531,22 @@ class IssDockingEnv(gym.Env):
                 if self._is_opposite_action(button_index, self._last_executed_action):
                     reward -= self.OPPOSITE_ACTION_PENALTY * risk_weight
             self._last_executed_action = button_index
+
+            prev_state_vec = np.array(
+                [prev_state_for_effect[k] for k in self.OBS_KEYS],
+                dtype=np.float32,
+            )
+            curr_state_vec = np.array([state[k] for k in self.OBS_KEYS], dtype=np.float32)
+            state_delta = curr_state_vec - prev_state_vec
+            self._action_effect_sum[button_index] += state_delta
+            self._action_effect_count[button_index] += 1
         else:
             reward += self.OBSERVATION_PATIENCE_REWARD
 
         self._prev_error = error
         self._prev_range = current_range
         self._prev_position_error = current_position_error
+        self._prev_abs_norm_obs = current_abs_norm_obs
         self._last_state = state
 
         # --- Termination checks (ordered from most severe to least) ----------
@@ -475,12 +591,40 @@ class IssDockingEnv(gym.Env):
             "control_interval_steps": dynamic_control_interval,
             "risk_weight": float(risk_weight),
             "position_reward": float(position_reward),
+            "absolute_error_penalty": float(absolute_error_penalty),
+            "improvement_reward": float(improvement_reward),
+            "raw_improvement_reward": float(raw_improvement_reward),
+            "improvement_reward_cap": float(improvement_reward_cap),
+            "error_improvement": float(error_improvement),
+            "safe_closing_rate": float(safe_closing_rate),
+            "closing_speed": float(closing_speed),
+            "overspeed": float(overspeed),
+            "aggressive_closing_penalty": float(aggressive_closing_penalty),
+            "moving_away_penalty": float(moving_away_penalty),
+            "divergence_penalty": float(divergence_penalty),
+            "divergence_sum": float(divergence_sum),
             "angular_rate_penalty": float(angular_rate_penalty),
+            "angular_rate_quadratic_penalty": float(angular_rate_quadratic_penalty),
             "angular_rate_danger_count": int(angular_rate_danger_count),
             "angular_rate_redzone": bool(angular_rate_redzone),
             "rate_danger": bool(rate_danger),
+            "action_effect_samples": (
+                int(self._action_effect_count[button_index])
+                if button_index is not None
+                else 0
+            ),
+            "action_effect_confident": (
+                bool(
+                    button_index is not None
+                    and self._action_effect_count[button_index]
+                    >= self.MIN_EFFECT_SAMPLES_FOR_CONFIDENCE
+                )
+            ),
+            "guided_button_override": bool(guided_override),
             **state,
         }
+        if button_index is not None and self._action_effect_count[button_index] > 0:
+            info["estimated_action_effect"] = self._get_action_effect_vector(button_index).tolist()
         return obs, float(reward), terminated, truncated, info
 
     def close(self) -> None:
@@ -590,6 +734,108 @@ class IssDockingEnv(gym.Env):
             return 0.65
 
         return self.MAX_RISK_WEIGHT
+
+    def _get_action_effect_vector(self, button_index: int) -> np.ndarray:
+        """Return mean state delta vector for a button index."""
+        samples = int(self._action_effect_count[button_index])
+        if samples <= 0:
+            return np.zeros(len(self.OBS_KEYS), dtype=np.float32)
+        return self._action_effect_sum[button_index] / samples
+
+    def _is_effect_confident(self, button_index: int) -> bool:
+        """Return True when enough samples exist for a button's effect estimate."""
+        return (
+            int(self._action_effect_count[button_index])
+            >= self.MIN_EFFECT_SAMPLES_FOR_CONFIDENCE
+        )
+
+    def _guided_button_override(
+        self,
+        base_button_index: int,
+        state: dict[str, float],
+    ) -> int:
+        """Optionally override base button using learned effect map.
+
+        In high-risk states, if the estimated effect of the chosen button would
+        worsen the most critical metric and the opposite button is confidently
+        estimated to improve it, switch to the opposite button.
+        """
+        if not self.effect_guidance:
+            return base_button_index
+
+        if not self._is_high_authority_state(state):
+            return base_button_index
+
+        opposite_pairs = {
+            0: 1, 1: 0,
+            2: 3, 3: 2,
+            4: 5, 5: 4,
+            6: 7, 7: 6,
+            8: 9, 9: 8,
+            10: 11, 11: 10,
+        }
+        opposite_button = opposite_pairs.get(base_button_index)
+        if opposite_button is None:
+            return base_button_index
+
+        if not (
+            self._is_effect_confident(base_button_index)
+            and self._is_effect_confident(opposite_button)
+        ):
+            return base_button_index
+
+        state_norm = np.abs(
+            np.array([state[k] for k in self.OBS_KEYS], dtype=np.float32)
+        ) / self.OBS_HIGH
+        critical_idx = int(np.argmax(state_norm))
+
+        critical_key = self.OBS_KEYS[critical_idx]
+        current_critical_value = float(state[critical_key])
+        base_effect = self._get_action_effect_vector(base_button_index)
+        opposite_effect = self._get_action_effect_vector(opposite_button)
+
+        base_predicted_abs = (
+            abs(current_critical_value + float(base_effect[critical_idx]))
+            / float(self.OBS_HIGH[critical_idx])
+        )
+        opposite_predicted_abs = (
+            abs(current_critical_value + float(opposite_effect[critical_idx]))
+            / float(self.OBS_HIGH[critical_idx])
+        )
+
+        # If opposite action is predicted to bring the critical metric closer
+        # to zero by a meaningful margin, use the opposite button.
+        if base_predicted_abs > (opposite_predicted_abs + self.EFFECT_GUIDANCE_MARGIN):
+            return opposite_button
+
+        return base_button_index
+
+    def get_action_effect_map(self) -> dict[str, dict[str, float]]:
+        """Return learned button→state influence map as nested dictionaries."""
+        effect_map: dict[str, dict[str, float]] = {}
+        for idx, button_name in enumerate(self.BUTTON_ACTIONS):
+            mean_delta = self._get_action_effect_vector(idx)
+            effect_map[button_name] = {
+                key: float(value) for key, value in zip(self.OBS_KEYS, mean_delta.tolist())
+            }
+        return effect_map
+
+    def get_action_effect_counts(self) -> dict[str, int]:
+        """Return sample counts collected for each button's effect estimate."""
+        return {
+            button_name: int(self._action_effect_count[idx])
+            for idx, button_name in enumerate(self.BUTTON_ACTIONS)
+        }
+
+    def get_action_effect_summary(self) -> dict[str, Any]:
+        """Return action-effect data bundle for export/visualization."""
+        return {
+            "obs_keys": list(self.OBS_KEYS),
+            "button_actions": list(self.BUTTON_ACTIONS),
+            "min_samples_for_confidence": int(self.MIN_EFFECT_SAMPLES_FOR_CONFIDENCE),
+            "effects": self.get_action_effect_map(),
+            "counts": self.get_action_effect_counts(),
+        }
 
     @staticmethod
     def _is_docked(state: dict[str, float]) -> bool:

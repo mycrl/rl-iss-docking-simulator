@@ -31,8 +31,10 @@ Then run this script.
 
 import argparse
 import importlib.util
+import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from stable_baselines3 import SAC
@@ -86,6 +88,48 @@ class SaveOnSuccessCallback(BaseCallback):
         return True
 
 
+class ExportActionEffectCallback(BaseCallback):
+    """Periodically export action-effect summary for visualization."""
+
+    def __init__(self, export_freq: int, export_dir: str, verbose: int = 0) -> None:
+        super().__init__(verbose)
+        self.export_freq = max(1, int(export_freq))
+        self.export_dir = Path(export_dir)
+        self._last_export_step = -1
+
+    def _on_step(self) -> bool:
+        if (self.num_timesteps - self._last_export_step) < self.export_freq:
+            return True
+
+        vec_env = self.model.get_env()
+        if vec_env is None:
+            return True
+
+        try:
+            summaries = vec_env.env_method("get_action_effect_summary")
+        except Exception:
+            return True
+
+        if not summaries:
+            return True
+
+        summary = summaries[0]
+        payload = {
+            "timesteps": int(self.num_timesteps),
+            **summary,
+        }
+
+        self.export_dir.mkdir(parents=True, exist_ok=True)
+        step_file = self.export_dir / f"action_effects_step_{self.num_timesteps}.json"
+        latest_file = self.export_dir / "action_effects_latest.json"
+        step_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        latest_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        self._last_export_step = self.num_timesteps
+        logger.info("Exported action-effect summary to '%s'", step_file)
+        return True
+
+
 def train(
     model_path: str,
     timesteps: int,
@@ -97,6 +141,9 @@ def train(
     control_interval_steps: int,
     action_confirmation_steps: int,
     adaptive_control: bool,
+    effect_guidance: bool,
+    effect_export_freq: int,
+    effect_export_dir: str,
 ) -> None:
     """Train an SAC agent on the ISS docking environment.
 
@@ -128,6 +175,12 @@ def train(
     adaptive_control:
         Dynamically increase/decrease control authority based on simulator
         risk state (distance, attitude, angular rates, closing rate).
+    effect_guidance:
+        Enable learned button→state effect guidance for high-risk corrections.
+    effect_export_freq:
+        Export learned action-effect summary every N timesteps.
+    effect_export_dir:
+        Directory for exported action-effect summary JSON files.
     """
     env = Monitor(
         IssDockingEnv(
@@ -136,6 +189,7 @@ def train(
             control_interval_steps=control_interval_steps,
             action_confirmation_steps=action_confirmation_steps,
             adaptive_control=adaptive_control,
+            effect_guidance=effect_guidance,
         )
     )
 
@@ -178,20 +232,32 @@ def train(
         model_path=model_path,
         replay_buffer_base=replay_buffer_base,
     )
-
-    logger.info("Training SAC for %s timesteps …", f"{timesteps:,}")
-    model.learn(
-        total_timesteps=timesteps,
-        callback=[checkpoint_callback, success_save_callback],
-        reset_num_timesteps=not resume,
+    effect_export_callback = ExportActionEffectCallback(
+        export_freq=effect_export_freq,
+        export_dir=effect_export_dir,
     )
 
-    dir_path = os.path.dirname(model_path)
-    if dir_path:
-        os.makedirs(dir_path, exist_ok=True)
-    model.save(model_path)
-    model.save_replay_buffer(replay_buffer_base)
-    logger.info("Model saved to '%s.zip'", model_path)
+    def _save_progress(reason: str) -> None:
+        dir_path = os.path.dirname(model_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+        model.save(model_path)
+        model.save_replay_buffer(replay_buffer_base)
+        logger.info("Progress saved (%s) to '%s.zip'", reason, model_path)
+
+    logger.info("Training SAC for %s timesteps …", f"{timesteps:,}")
+    try:
+        model.learn(
+            total_timesteps=timesteps,
+            callback=[checkpoint_callback, success_save_callback, effect_export_callback],
+            reset_num_timesteps=not resume,
+        )
+        _save_progress("completed")
+    except KeyboardInterrupt:
+        logger.warning("Training interrupted by user (Ctrl+C). Saving progress …")
+        _save_progress("interrupted")
+    finally:
+        env.close()
 
 
 def main() -> None:
@@ -262,7 +328,30 @@ def main() -> None:
         action="store_false",
         help="Disable adaptive control and keep fixed control interval.",
     )
+    parser.add_argument(
+        "--effect-guidance",
+        action="store_true",
+        help="Enable learned action-effect guidance in high-risk states (default).",
+    )
+    parser.add_argument(
+        "--no-effect-guidance",
+        dest="effect_guidance",
+        action="store_false",
+        help="Disable learned action-effect guidance.",
+    )
+    parser.add_argument(
+        "--effect-export-freq",
+        type=int,
+        default=5000,
+        help="Export learned action-effect summary every N timesteps.",
+    )
+    parser.add_argument(
+        "--effect-export-dir",
+        default="analysis/effects",
+        help="Directory for periodic action-effect summary JSON exports.",
+    )
     parser.set_defaults(adaptive_control=True)
+    parser.set_defaults(effect_guidance=True)
     args = parser.parse_args()
 
     train(
@@ -276,6 +365,9 @@ def main() -> None:
         control_interval_steps=args.control_interval_steps,
         action_confirmation_steps=args.action_confirmation_steps,
         adaptive_control=args.adaptive_control,
+        effect_guidance=args.effect_guidance,
+        effect_export_freq=args.effect_export_freq,
+        effect_export_dir=args.effect_export_dir,
     )
 
 
