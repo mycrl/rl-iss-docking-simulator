@@ -53,17 +53,24 @@ If ``range`` exceeds ``MAX_RANGE`` (350 m) the episode ends immediately with a
 failure penalty.  This prevents the spacecraft from drifting uncontrollably far
 from the ISS; the agent must keep range within bounds while closing in.
 
+Attitude failure
+----------------
+If the absolute value of roll, yaw, or pitch exceeds ``MAX_ATTITUDE`` (80°)
+the spacecraft is considered to have lost attitude control and the episode ends
+immediately with ``REWARD_ATTITUDE_FAILURE``.
+
 Reward shaping
 --------------
 Each step the agent receives:
 
-* ``+range_delta * RANGE_REWARD_SCALE`` — reward proportional to how much
-  closer the spacecraft moved this step (positive = closing in).
-* ``-n_warnings * WARNING_PENALTY`` — a small penalty for every non-range
+* **Asymmetric range reward** — `+range_decrease × RANGE_REWARD_SCALE` when
+  closing in, or `+range_decrease × RANGE_PENALTY_SCALE` when drifting away
+  (``RANGE_PENALTY_SCALE > RANGE_REWARD_SCALE`` to strongly discourage retreat).
+* ``-n_warnings × WARNING_PENALTY`` — a small penalty for every non-range
   observation that still exceeds the 0.2 success threshold.
 * ``REWARD_STEP`` — a fixed time penalty to encourage speed.
-* ``REWARD_SUCCESS`` on successful docking, ``REWARD_OUT_OF_RANGE`` on abort,
-  or ``REWARD_COLLISION`` on a dangerous close approach.
+* Terminal bonuses/penalties on docking (`+100`), out-of-range (`−50`),
+  attitude failure (`−50`), or collision (`−50`).
 """
 
 import logging
@@ -150,6 +157,10 @@ class IssDockingEnv(gym.Env):
     # as a failure (the spacecraft has drifted too far to recover).
     MAX_RANGE: float = 350.0   # metres
 
+    # Attitude limit: if roll, yaw, or pitch exceeds this magnitude (degrees)
+    # the spacecraft is considered to have lost control — episode fails immediately.
+    MAX_ATTITUDE: float = 80.0   # degrees
+
     # Collision guard: approach rate (m/s, negative = closing) must not
     # exceed this magnitude when within NEAR_DISTANCE of the port.
     MAX_SAFE_RATE: float = 0.2   # m/s
@@ -158,15 +169,22 @@ class IssDockingEnv(gym.Env):
     # Reward constants.
     REWARD_SUCCESS: float = 100.0
     REWARD_COLLISION: float = -50.0
-    REWARD_OUT_OF_RANGE: float = -50.0  # penalty for drifting beyond MAX_RANGE
-    REWARD_STEP: float = -0.01          # per-step time penalty
+    REWARD_OUT_OF_RANGE: float = -50.0    # penalty for drifting beyond MAX_RANGE
+    REWARD_ATTITUDE_FAILURE: float = -50.0  # penalty for attitude limit breach
+    REWARD_STEP: float = -0.01              # per-step time penalty
 
     # Reward shaping scales.
     # Points awarded per metre the spacecraft closes on the ISS.
     RANGE_REWARD_SCALE: float = 1.0
+    # Penalty multiplier per metre the spacecraft moves away from the ISS.
+    # Larger than RANGE_REWARD_SCALE to strongly discourage backing away.
+    RANGE_PENALTY_SCALE: float = 2.0
     # Penalty applied for each non-range observation that exceeds the 0.2
     # success threshold (i.e. each "warning" reading that is still too large).
     WARNING_PENALTY: float = 0.05
+
+    # Attitude axes monitored for the ±MAX_ATTITUDE hard limit.
+    ATTITUDE_KEYS: tuple[str, ...] = ("roll", "yaw", "pitch")
 
     def __init__(
         self,
@@ -246,19 +264,22 @@ class IssDockingEnv(gym.Env):
         success = False
 
         # Reward shaping:
-        #   1. Approach reward — points proportional to how much closer the
-        #      spacecraft got to the ISS this step (positive = closing in).
+        #   1. Approach reward (asymmetric) — larger penalty for backing away
+        #      than the reward for closing in, to strongly discourage retreat.
         #   2. Warning penalty — one small deduction for every non-range
         #      observation that still exceeds the 0.2 success threshold.
         #   3. Per-step time penalty to encourage efficient behaviour.
         current_range = state["range"]
         range_decrease = self._prev_range - current_range   # positive when closing in
+        range_reward = range_decrease * (
+            self.RANGE_REWARD_SCALE if range_decrease >= 0 else self.RANGE_PENALTY_SCALE
+        )
         n_warnings = sum(
             1 for k in self._warning_keys if abs(state[k]) > self.SUCCESS_THRESHOLD
         )
         reward = (
             self.REWARD_STEP
-            + range_decrease * self.RANGE_REWARD_SCALE
+            + range_reward
             - n_warnings * self.WARNING_PENALTY
         )
         self._prev_error = error
@@ -266,7 +287,13 @@ class IssDockingEnv(gym.Env):
 
         # --- Termination checks (ordered from most severe to least) ----------
 
-        if current_range > self.MAX_RANGE:
+        if any(
+            abs(state[k]) > self.MAX_ATTITUDE for k in self.ATTITUDE_KEYS
+        ):
+            # Attitude has exceeded ±80° — spacecraft lost control.
+            reward += self.REWARD_ATTITUDE_FAILURE
+            terminated = True
+        elif current_range > self.MAX_RANGE:
             # Spacecraft has drifted beyond 350 m — unrecoverable failure.
             reward += self.REWARD_OUT_OF_RANGE
             terminated = True
