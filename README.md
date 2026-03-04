@@ -1,2 +1,3 @@
-# rl-iss-docking-simulator
+# RL ISS Docking Simulator
+
 ISS Docking Simulator for RL
