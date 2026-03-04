@@ -126,17 +126,43 @@ class IssDockingEnv(gym.Env):
         thrust = action * self.MAX_THRUST
         accel = thrust / self.DRAGON_MASS
 
+        # Save position before integration to detect port crossing
+        prev_pos = self._pos.copy()
+        prev_z = prev_pos[2]
+
         # Integrate: semi-implicit Euler
         self._vel += accel * self.DT
         self._pos += self._vel * self.DT
         self._steps += 1
 
-        distance = float(np.linalg.norm(self._pos))
-        lateral = float(np.linalg.norm(self._pos[:2]))  # ||(x, y)||
         speed = float(np.linalg.norm(self._vel))
 
         terminated = False
         truncated = False
+
+        # --- Detect docking port crossing (overshoot guard) ---
+        # If the spacecraft flew past z=0 in one step (prev_z > 0, z ≤ 0),
+        # evaluate the docking condition at the interpolated crossing point.
+        denom = prev_z - self._pos[2]
+        if prev_z > 0.0 and self._pos[2] <= 0.0 and denom > 1e-12:
+            # Linear interpolation: fraction of DT when z == 0
+            t_frac = prev_z / denom
+            cross_x = prev_pos[0] + t_frac * (self._pos[0] - prev_pos[0])
+            cross_y = prev_pos[1] + t_frac * (self._pos[1] - prev_pos[1])
+            # Compare squared distance to avoid unnecessary sqrt
+            cross_lateral_sq = cross_x**2 + cross_y**2
+            if cross_lateral_sq <= self.DOCK_RADIUS**2:
+                # The spacecraft flew through the port face
+                cross_lateral = float(np.sqrt(cross_lateral_sq))
+                distance = cross_lateral
+                lateral = cross_lateral
+            else:
+                distance = float(np.linalg.norm(self._pos))
+                lateral = float(np.linalg.norm(self._pos[:2]))
+        else:
+            distance = float(np.linalg.norm(self._pos))
+            lateral = float(np.linalg.norm(self._pos[:2]))
+
         reward = self.REWARD_TIME_PENALTY
 
         # Lateral offset penalty (encourages staying on the docking axis)
@@ -148,11 +174,13 @@ class IssDockingEnv(gym.Env):
         self._prev_distance = distance
 
         # Check terminal conditions
+        success = False
         if distance <= self.DOCK_RADIUS:
             if speed <= self.MAX_DOCK_SPEED:
                 # Successful docking
                 reward += self.REWARD_SUCCESS
                 terminated = True
+                success = True
             else:
                 # Collision – too fast
                 reward += self.REWARD_CRASH
@@ -174,6 +202,7 @@ class IssDockingEnv(gym.Env):
             "lateral_offset": lateral,
             "speed": speed,
             "steps": self._steps,
+            "success": success,
         }
 
         return obs, reward, terminated, truncated, info

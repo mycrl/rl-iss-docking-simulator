@@ -47,8 +47,7 @@ def evaluate(model_path: str, n_episodes: int) -> None:
         episode_rewards.append(total_reward)
         final_distances.append(info["distance"])
 
-        # A success is detected by a final distance within the dock radius
-        if info["distance"] <= IssDockingEnv.DOCK_RADIUS and info["speed"] <= IssDockingEnv.MAX_DOCK_SPEED:
+        if info["success"]:
             successes += 1
 
         print(

@@ -60,7 +60,9 @@ def train(timesteps: int, save_path: str, n_envs: int) -> None:
     print(f"Training PPO for {timesteps:,} timesteps …")
     model.learn(total_timesteps=timesteps, progress_bar=True)
 
-    os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+    dir_path = os.path.dirname(save_path)
+    if dir_path:
+        os.makedirs(dir_path, exist_ok=True)
     model.save(save_path)
     print(f"Model saved to '{save_path}.zip'")
 
