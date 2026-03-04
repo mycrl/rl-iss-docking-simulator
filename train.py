@@ -120,7 +120,6 @@ def train(
         total_timesteps=timesteps,
         callback=checkpoint_callback,
         reset_num_timesteps=not resume,
-        progress_bar=True,
     )
 
     dir_path = os.path.dirname(model_path)
