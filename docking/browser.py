@@ -35,6 +35,7 @@ Supports two operating modes:
 """
 
 import logging
+import re
 import time
 from typing import Optional
 
@@ -271,9 +272,12 @@ class SimulatorBrowser:
                     "Fill in STATE_SELECTORS with the correct CSS selectors."
                 )
             text = self._page.inner_text(selector).strip()
+            # The DOM includes units (e.g. "200.0 m", "15.0°", "0.039 m/s").
+            # Extract just the leading numeric token (with optional sign).
+            match = re.search(r"-?\d+\.?\d*", text)
             try:
-                state[key] = float(text)
-            except ValueError:
+                state[key] = float(match.group()) if match else 0.0
+            except (ValueError, AttributeError):
                 logger.warning(
                     "Could not parse '%s' for state key '%s'; defaulting to 0.0",
                     text,
