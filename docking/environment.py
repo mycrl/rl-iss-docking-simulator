@@ -5,19 +5,23 @@ Wraps the browser-controlled SpaceX ISS Docking Simulator
 (https://iss-sim.spacex.com/) as a Gymnasium environment with a continuous
 observation space and a discrete action space.
 
-Observation (8-D continuous)
------------------------------
-x, y, z    Position offsets from the docking axis (metres).
-roll        Roll attitude error (degrees).
-range       Distance to the ISS docking port (metres).
-yaw         Yaw attitude error (degrees).
-rate        Approach rate — negative means closing in (m/s).
-pitch       Pitch attitude error (degrees).
+Observation (11-D continuous)
+------------------------------
+x, y, z         Position offsets from the docking axis (metres).
+roll            Roll attitude error (degrees).
+roll_rate       Roll angular rate (°/s).
+range           Distance to the ISS docking port (metres).
+yaw             Yaw attitude error (degrees).
+yaw_rate        Yaw angular rate (°/s).
+rate            Approach rate — negative means closing in (m/s).
+pitch           Pitch attitude error (degrees).
+pitch_rate      Pitch angular rate (°/s).
 
-Action (Discrete, 12)
+Action (Discrete, 14)
 -----------------------
-Each action corresponds to a single RCS button press on the simulator
-interface.  The resulting motion is continuous because momentum accumulates.
+Each action corresponds to a single RCS button press or precision-toggle click
+on the simulator interface.  The resulting motion is continuous because momentum
+accumulates.
 
 Index  Name
 -----  ----
@@ -33,11 +37,15 @@ Index  Name
 9      pitch_down
 10     yaw_left
 11     yaw_right
+12     toggle_translation  (switch translation precision mode)
+13     toggle_rotation     (switch rotation precision mode)
 
 Docking success
 ---------------
-All of x, y, z, roll, range, yaw, rate, pitch must be within
-``SUCCESS_THRESHOLD`` (0.2) of zero simultaneously.
+All of x, y, z, roll, roll_rate, range, yaw, yaw_rate, rate, pitch, pitch_rate
+must be within ``SUCCESS_THRESHOLD`` (0.2) of zero simultaneously.
+This mirrors the real simulator's criterion: every displayed reading must be
+below 0.2 before a successful dock is registered.
 """
 
 import logging
@@ -97,13 +105,23 @@ class IssDockingEnv(gym.Env):
         "pitch_down",          # 9
         "yaw_left",            # 10
         "yaw_right",           # 11
+        "toggle_translation",  # 12
+        "toggle_rotation",     # 13
     ]
 
     # Observation upper bounds used for clipping and normalisation.
-    # Order mirrors OBS_KEYS: x, y, z, roll, range, yaw, rate, pitch
-    OBS_KEYS: list[str] = ["x", "y", "z", "roll", "range", "yaw", "rate", "pitch"]
+    # Order mirrors OBS_KEYS:
+    #   x, y, z, roll, roll_rate, range, yaw, yaw_rate, rate, pitch, pitch_rate
+    OBS_KEYS: list[str] = [
+        "x", "y", "z",
+        "roll", "roll_rate",
+        "range",
+        "yaw", "yaw_rate",
+        "rate",
+        "pitch", "pitch_rate",
+    ]
     OBS_HIGH: np.ndarray = np.array(
-        [300.0, 300.0, 300.0, 180.0, 500.0, 180.0, 5.0, 180.0],
+        [300.0, 300.0, 300.0, 180.0, 10.0, 500.0, 180.0, 10.0, 5.0, 180.0, 10.0],
         dtype=np.float32,
     )
 

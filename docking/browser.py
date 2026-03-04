@@ -23,10 +23,9 @@ Supports two operating modes:
         browser.connect()
 
 .. note::
-    The CSS selectors in :attr:`SimulatorBrowser.BUTTON_SELECTORS` and
-    :attr:`SimulatorBrowser.STATE_SELECTORS` are placeholders.  Inspect the
-    simulator page (F12 → DevTools) and replace each empty string with the
-    correct CSS selector or DOM ID before running the agent.
+    Fill in :attr:`SimulatorBrowser.START_BUTTON_SELECTOR` with the correct
+    CSS selector for the button that starts the simulation after the page loads
+    (inspect the simulator page with F12 → DevTools to find it).
 """
 
 import logging
@@ -73,40 +72,49 @@ class SimulatorBrowser:
 
     # ------------------------------------------------------------------
     # CSS selectors for control buttons.
-    # TODO: Inspect the simulator page (DevTools → Elements) and replace
-    #       each empty string with the correct CSS selector for that button.
     # ------------------------------------------------------------------
     BUTTON_SELECTORS: dict[str, str] = {
-        "translate_forward":  "",  # TODO: e.g. "#translate-forward-button"
-        "translate_backward": "",  # TODO: e.g. "#translate-backward-button"
-        "translate_up":       "",  # TODO: e.g. "#translate-up-button"
-        "translate_down":     "",  # TODO: e.g. "#translate-down-button"
-        "translate_left":     "",  # TODO: e.g. "#translate-left-button"
-        "translate_right":    "",  # TODO: e.g. "#translate-right-button"
-        "roll_left":          "",  # TODO: e.g. "#roll-left-button"
-        "roll_right":         "",  # TODO: e.g. "#roll-right-button"
-        "pitch_up":           "",  # TODO: e.g. "#pitch-up-button"
-        "pitch_down":         "",  # TODO: e.g. "#pitch-down-button"
-        "yaw_left":           "",  # TODO: e.g. "#yaw-left-button"
-        "yaw_right":          "",  # TODO: e.g. "#yaw-right-button"
+        "translate_forward":  "#translate-forward-button",
+        "translate_backward": "#translate-backward-button",
+        "translate_up":       "#translate-up-button",
+        "translate_down":     "#translate-down-button",
+        "translate_left":     "#translate-left-button",
+        "translate_right":    "#translate-right-button",
+        "roll_left":          "#roll-left-button",
+        "roll_right":         "#roll-right-button",
+        "pitch_up":           "#pitch-up-button",
+        "pitch_down":         "#pitch-down-button",
+        "yaw_left":           "#yaw-left-button",
+        "yaw_right":          "#yaw-right-button",
+        "toggle_translation": "#toggle-translation",
+        "toggle_rotation":    "#toggle-rotation",
     }
 
     # ------------------------------------------------------------------
     # CSS selectors for state readout elements.
-    # TODO: Inspect the simulator page and replace each empty string with
-    #       the CSS selector of the DOM element whose text content gives
-    #       the numeric reading for that state variable.
+    # The simulator DOM uses a different child-element structure per field:
+    #   x, y, z       — single div inside their container (#x-range, etc.)
+    #   roll/yaw/pitch — first child div = angle (°); second = angular rate (°/s)
+    #   range          — second child div = distance to port (m)
+    #   rate           — second child div = approach rate (m/s)
     # ------------------------------------------------------------------
     STATE_SELECTORS: dict[str, str] = {
-        "x":     "",  # TODO: e.g. "#x-error-number"    (metres)
-        "y":     "",  # TODO: e.g. "#y-error-number"    (metres)
-        "z":     "",  # TODO: e.g. "#z-error-number"    (metres)
-        "roll":  "",  # TODO: e.g. "#roll-error-number" (degrees)
-        "range": "",  # TODO: e.g. "#range-number"      (metres)
-        "yaw":   "",  # TODO: e.g. "#yaw-error-number"  (degrees)
-        "rate":  "",  # TODO: e.g. "#rate-number"       (m/s)
-        "pitch": "",  # TODO: e.g. "#pitch-error-number"(degrees)
+        "x":          "#x-range div",
+        "y":          "#y-range div",
+        "z":          "#z-range div",
+        "roll":       "#roll div:nth-child(1)",
+        "roll_rate":  "#roll div:nth-child(2)",
+        "range":      "#range div:nth-child(2)",
+        "yaw":        "#yaw div:nth-child(1)",
+        "yaw_rate":   "#yaw div:nth-child(2)",
+        "rate":       "#rate div:nth-child(2)",
+        "pitch":      "#pitch div:nth-child(1)",
+        "pitch_rate": "#pitch div:nth-child(2)",
     }
+
+    # Selector for the button that starts the simulation after the page loads.
+    # TODO: Replace with the correct CSS selector for the START/BEGIN button.
+    START_BUTTON_SELECTOR: str = ""
 
     def __init__(
         self,
@@ -148,6 +156,7 @@ class SimulatorBrowser:
                 wait_until="networkidle",
                 timeout=int(self._page_load_timeout * 1_000),
             )
+            self._click_start()
             logger.info("Launched browser and navigated to %s", self.SIMULATOR_URL)
         else:
             self._browser = self._playwright.chromium.connect_over_cdp(self._cdp_url)
@@ -205,6 +214,7 @@ class SimulatorBrowser:
             timeout=int(self._page_load_timeout * 1_000),
         )
         time.sleep(wait)
+        self._click_start()
 
     # ------------------------------------------------------------------
     # Actions & observations
@@ -238,8 +248,12 @@ class SimulatorBrowser:
         Returns
         -------
         dict[str, float]
-            Keys: ``x``, ``y``, ``z``, ``roll``, ``range``, ``yaw``,
-            ``rate``, ``pitch``.
+            Keys: ``x``, ``y``, ``z``,
+            ``roll``, ``roll_rate``,
+            ``range``,
+            ``yaw``, ``yaw_rate``,
+            ``rate``,
+            ``pitch``, ``pitch_rate``.
 
         Raises
         ------
@@ -291,6 +305,27 @@ class SimulatorBrowser:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _click_start(self) -> None:
+        """Click the START/BEGIN button after the simulator page loads.
+
+        Waits for the button specified by :attr:`START_BUTTON_SELECTOR` to
+        become visible, then clicks it.  If :attr:`START_BUTTON_SELECTOR` is
+        empty, this method is a no-op.
+        """
+        if not self.START_BUTTON_SELECTOR:
+            logger.debug(
+                "START_BUTTON_SELECTOR not configured; skipping auto-start click."
+            )
+            return
+        self._require_page()
+        self._page.wait_for_selector(
+            self.START_BUTTON_SELECTOR,
+            state="visible",
+            timeout=int(self._page_load_timeout * 1_000),
+        )
+        self._page.click(self.START_BUTTON_SELECTOR)
+        logger.info("Clicked START button; simulation is running.")
 
     def _require_page(self) -> None:
         """Raise :class:`RuntimeError` if not yet connected."""
