@@ -10,7 +10,7 @@ Usage
     python evaluate.py --launch-browser --model models/sac_docking --episodes 10
 
     # Connect to a manually-opened Chrome instance (CDP mode, default)
-    python evaluate.py --model models/dqn_docking --episodes 10
+    python evaluate.py --model models/sac_docking --episodes 10
 
 In CDP mode, make sure the simulator is open in Chrome with remote debugging
 enabled (see ``docking/browser.py`` for instructions).

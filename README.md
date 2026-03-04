@@ -19,7 +19,7 @@ errors roll/pitch/yaw), the approach rate, and the range to all fall below 0.2.
 
 | Property | Value |
 |---|---|
-| Observation space | 8-D continuous — x, y, z (m), roll (°), range (m), yaw (°), rate (m/s), pitch (°) |
+| Observation space | 11-D continuous — x, y, z (m), roll (°), roll rate (°/s), range (m), yaw (°), yaw rate (°/s), rate (m/s), pitch (°), pitch rate (°/s) |
 | Action space | Continuous Box(6) — `[tx, ty, tz, roll, pitch, yaw]` in `[-1,1]` |
 | Step delay | 0.5 s (wait for physics to settle after each button press) |
 | Max episode length | 3 000 steps |
@@ -32,15 +32,21 @@ adaptive control authority to reduce over-control in high-inertia dynamics).
 
 **Episode termination conditions**
 
-- ✅ **Success** — all readings (x, y, z, roll, range, yaw, rate, pitch) < 0.2
+- ✅ **Success** — all 11 readings are within ±0.2
+- 🧭 **Attitude limit** — `|roll|` or `|yaw|` or `|pitch|` > 30°
+- 🔴 **Angular-rate red zone** — `|roll_rate|` or `|yaw_rate|` or `|pitch_rate|` > 0.8 °/s
+- 🚫 **Out of range** — range > 350 m
 - 💥 **Collision** — approach rate < −0.2 m/s when within 5 m of the ISS
 - ⏱ **Timeout** — 3 000 steps elapsed
 
 **Reward shaping**
 
 - `+100` for a successful docking
-- `−50` for a collision
-- `+ (previous_error − current_error)` progress reward each step
+- `−50` for terminal failures (collision / out-of-range / attitude / red-zone)
+- Asymmetric range shaping (closing-in rewarded, drifting-away penalized more)
+- Position trend shaping for `|x|+|y|+|z|` (worsening penalized more than improvement rewarded)
+- Angular-rate damping penalty and danger-zone penalties (`|rate| > 0.2`, angular-rate danger > 0.5)
+- Control smoothness penalties + small observation patience reward
 - `−0.01` per-step time penalty
 
 ### Algorithm
@@ -72,25 +78,7 @@ playwright install chromium
 
 ## Setup
 
-### 1 — Configure CSS selectors
-
-Open the simulator in a browser, press **F12** to open DevTools, and use the
-Elements inspector to find the CSS selectors for each control button and state
-readout.  Fill them in `docking/browser.py`:
-
-```python
-BUTTON_SELECTORS = {
-    "translate_forward":  "#translate-forward-button",  # example
-    # … fill in all 12 entries …
-}
-
-STATE_SELECTORS = {
-    "x":    "#x-error-number",  # example
-    # … fill in all 8 entries …
-}
-```
-
-### 2 — Choose a browser mode
+### 1 — Choose a browser mode
 
 There are two ways to connect to the simulator:
 
@@ -103,6 +91,9 @@ Chrome setup is needed:
 ```bash
 python train.py --launch-browser
 ```
+
+In managed mode, the first page load asks for a one-time confirmation in terminal
+(`y` + Enter). Later episode resets are fully automatic.
 
 **Option B — CDP mode (connect to a manually-opened Chrome)**
 
@@ -123,6 +114,12 @@ Then run the scripts without `--launch-browser` (the default):
 
 ```bash
 python train.py
+```
+
+On Windows (PowerShell), launch Chrome with remote debugging like this:
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 https://iss-sim.spacex.com/
 ```
 
 ## Usage
@@ -148,6 +145,9 @@ Optional arguments:
 | `--resume` | *(flag)* | Continue from an existing model |
 | `--checkpoint-freq` | 10 000 | Steps between checkpoint saves |
 | `--checkpoint-dir` | `checkpoints` | Directory for checkpoint files |
+| `--control-interval-steps` | 2 | Base interval between real control clicks |
+| `--action-confirmation-steps` | 2 | Consecutive same-intent steps required before click (non-high-risk) |
+| `--adaptive-control` / `--no-adaptive-control` | enabled | Enable/disable risk-adaptive control authority |
 
 Example — resume a previous run in managed mode:
 

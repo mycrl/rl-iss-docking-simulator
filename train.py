@@ -26,7 +26,7 @@ In CDP mode, start Chrome with remote debugging enabled before running::
 
     google-chrome --remote-debugging-port=9222 https://iss-sim.spacex.com/
 
-Then fill in the CSS selectors in ``docking/browser.py`` and run this script.
+Then run this script.
 """
 
 import argparse
@@ -179,7 +179,7 @@ def train(
         replay_buffer_base=replay_buffer_base,
     )
 
-    logger.info("Training DQN for %s timesteps …", f"{timesteps:,}")
+    logger.info("Training SAC for %s timesteps …", f"{timesteps:,}")
     model.learn(
         total_timesteps=timesteps,
         callback=[checkpoint_callback, success_save_callback],
