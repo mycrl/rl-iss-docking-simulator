@@ -1,36 +1,43 @@
 """
-Evaluation script for the Dragon spacecraft ISS docking simulator.
+Evaluation script for the SpaceX ISS Docking Simulator.
 
-Loads a trained PPO model and runs it in the docking environment, reporting
-statistics about episode outcomes (success rate, mean reward, etc.).
+Loads a trained DQN model and runs it on the browser-based SpaceX ISS Docking
+Simulator in deterministic mode, then prints per-episode and aggregate stats.
 
 Usage
 -----
-    python evaluate.py                            # evaluate default model
-    python evaluate.py --model models/ppo_docking # specify model path
-    python evaluate.py --episodes 20              # run 20 evaluation episodes
+    python evaluate.py --model models/dqn_docking --episodes 10
+
+Before running, make sure the simulator is open in Chrome with remote
+debugging enabled (see ``docking/browser.py`` for instructions).
 """
 
 import argparse
+import logging
 
 import numpy as np
-from stable_baselines3 import PPO
+from stable_baselines3 import DQN
 
-from environment import IssDockingEnv
+from docking import IssDockingEnv
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def evaluate(model_path: str, n_episodes: int) -> None:
-    """Run evaluation episodes and print a summary.
+    """Run deterministic evaluation episodes and print a summary.
 
-    Args:
-        model_path: Path to the saved model (with or without `.zip`).
-        n_episodes: Number of episodes to evaluate.
+    Parameters
+    ----------
+    model_path:
+        Path to the saved DQN model (with or without the ``.zip`` extension).
+    n_episodes:
+        Number of episodes to evaluate.
     """
     env = IssDockingEnv()
-    model = PPO.load(model_path, env=env)
+    model = DQN.load(model_path, env=env)
 
-    episode_rewards = []
-    final_distances = []
+    episode_rewards: list[float] = []
     successes = 0
 
     for episode in range(n_episodes):
@@ -45,41 +52,40 @@ def evaluate(model_path: str, n_episodes: int) -> None:
             done = terminated or truncated
 
         episode_rewards.append(total_reward)
-        final_distances.append(info["distance"])
-
-        if info["success"]:
+        if info.get("success", False):
             successes += 1
 
         print(
             f"Episode {episode + 1:3d}/{n_episodes}: "
             f"reward={total_reward:8.2f}  "
-            f"distance={info['distance']:6.2f} m  "
-            f"speed={info['speed']:.2f} m/s  "
+            f"range={info.get('range', 0.0):.2f} m  "
+            f"rate={info.get('rate', 0.0):.3f} m/s  "
             f"steps={info['steps']}"
         )
 
+    env.close()
+
     print("\n--- Evaluation Summary ---")
-    print(f"Episodes        : {n_episodes}")
-    print(f"Success rate    : {successes / n_episodes * 100:.1f}%")
-    print(f"Mean reward     : {np.mean(episode_rewards):.2f}")
-    print(f"Mean final dist : {np.mean(final_distances):.2f} m")
+    print(f"Episodes     : {n_episodes}")
+    print(f"Success rate : {successes / n_episodes * 100:.1f}%")
+    print(f"Mean reward  : {np.mean(episode_rewards):.2f}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Evaluate a trained PPO agent on the ISS docking simulator."
+        description="Evaluate a trained DQN agent on the SpaceX ISS Docking Simulator.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--model",
-        type=str,
-        default="models/ppo_docking",
-        help="Path to the trained model file (default: models/ppo_docking).",
+        default="models/dqn_docking",
+        help="Path to the trained model file.",
     )
     parser.add_argument(
         "--episodes",
         type=int,
         default=10,
-        help="Number of evaluation episodes to run (default: 10).",
+        help="Number of evaluation episodes to run.",
     )
     args = parser.parse_args()
 
