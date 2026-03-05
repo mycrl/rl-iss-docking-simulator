@@ -1,4 +1,4 @@
-# rl-iss-docking-simulator
+# Autonomous ISS
 
 A Dragon spacecraft ISS docking autonomous driving system built with a custom
 [Gymnasium](https://gymnasium.farama.org/) environment and trained with
