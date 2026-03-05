@@ -27,8 +27,12 @@ errors roll/pitch/yaw), the approach rate, and the range to all fall below 0.2.
 **Actions**
 
 The policy outputs a continuous 6-D command vector. The environment maps the
-dominant component to one simulator thruster button click (with deadzone and
-adaptive control authority to reduce over-control in high-inertia dynamics).
+dominant component to one simulator thruster button click.
+
+- Deadzone: no click is sent when dominant magnitude `< 0.2`
+- Control cadence: one real click every `N` env steps (`N` is adaptive by risk)
+- Action confirmation: in normal states, the same intent must persist for
+    `action_confirmation_steps`; in high-risk states, confirmation is forced to `1`
 
 **Episode termination conditions**
 
@@ -47,13 +51,16 @@ adaptive control authority to reduce over-control in high-inertia dynamics).
 - Position trend shaping for `|x|+|y|+|z|` (worsening penalized more than improvement rewarded)
 - Angular-rate damping penalty and danger-zone penalties (`|rate| > 0.2`, angular-rate danger > 0.5)
 - Control smoothness penalties + small observation patience reward
-- Learned button→state effect map used for high-risk action guidance
+- Learned button→state effect map is estimated online and exported for analysis/visualization
 - `−0.01` per-step time penalty
 
 ### Algorithm
 
-Soft Actor-Critic (**SAC**) from Stable-Baselines3 with an MLP policy.  Only
-one simulator instance runs at a time, so training is strictly sequential.
+Soft Actor-Critic (**SAC**) from Stable-Baselines3 with an MLP policy.
+Training supports vectorized multi-environment sampling configurable via
+`--num-envs` (default `5`). By default, each environment runs in its own
+browser (process-based parallelism). Optionally, you can use one shared
+browser with multiple tabs via `--shared-browser-tabs`.
 
 ## Project Structure
 
@@ -93,8 +100,16 @@ Chrome setup is needed:
 python train.py --launch-browser
 ```
 
-In managed mode, the first page load asks for a one-time confirmation in terminal
-(`y` + Enter). Later episode resets are fully automatic.
+In managed mode, the first environment reset follows a fixed auto-start sequence:
+
+- Read `#preloader-percent` until it reaches `100`
+- Wait 10 seconds, then click `#begin-button`
+- Wait another 10 seconds before training proceeds
+
+When using `--shared-browser-tabs`, all tabs execute this sequence in parallel,
+and training starts only after all tabs are ready.
+
+Later episode resets are fully automatic.
 
 **Option B — CDP mode (connect to a manually-opened Chrome)**
 
@@ -111,10 +126,10 @@ On macOS:
     --remote-debugging-port=9222 https://iss-sim.spacex.com/
 ```
 
-Then run the scripts without `--launch-browser` (the default):
+Then run scripts without `--launch-browser` (single-environment CDP use):
 
 ```bash
-python train.py
+python train.py --num-envs 1
 ```
 
 On Windows (PowerShell), launch Chrome with remote debugging like this:
@@ -128,30 +143,40 @@ On Windows (PowerShell), launch Chrome with remote debugging like this:
 ### Train
 
 ```bash
-# Managed mode — browser launched automatically
-python train.py --launch-browser
+# Default: 5 envs in parallel (one browser per env; managed mode auto-enabled)
+python train.py --headless
 
-# CDP mode — connect to a manually-opened Chrome (default)
-python train.py
+# Single-environment CDP mode — connect to a manually-opened Chrome
+python train.py --num-envs 1
+
+# Optional: one shared browser with multiple tabs
+python train.py --headless --num-envs 5 --shared-browser-tabs
 ```
 
 Optional arguments:
 
-| Argument | Default | Description |
-|---|---|---|
-| `--launch-browser` | *(flag)* | Let Playwright launch Chromium automatically |
-| `--headless` | *(flag)* | Run browser without a visible window (with `--launch-browser`) |
-| `--timesteps` | 500 000 | Total training timesteps |
-| `--model-path` | `models/sac_docking` | Where to save the model |
-| `--resume` | *(flag)* | Continue from an existing model |
-| `--checkpoint-freq` | 10 000 | Steps between checkpoint saves |
-| `--checkpoint-dir` | `checkpoints` | Directory for checkpoint files |
-| `--control-interval-steps` | 2 | Base interval between real control clicks |
-| `--action-confirmation-steps` | 2 | Consecutive same-intent steps required before click (non-high-risk) |
-| `--adaptive-control` / `--no-adaptive-control` | enabled | Enable/disable risk-adaptive control authority |
-| `--effect-guidance` / `--no-effect-guidance` | enabled | Enable/disable learned action-effect guidance |
-| `--effect-export-freq` | 5000 | Export learned action-effect summary every N timesteps |
-| `--effect-export-dir` | `analysis/effects` | Directory for action-effect JSON exports |
+| Argument                                       | Default              | Description                                                                                                                |
+|------------------------------------------------|----------------------|----------------------------------------------------------------------------------------------------------------------------|
+| `--launch-browser`                             | *(flag)*             | Let Playwright launch Chromium automatically                                                                               |
+| `--headless`                                   | *(flag)*             | Run browser without a visible window (with `--launch-browser`)                                                             |
+| `--timesteps`                                  | 500 000              | Total training timesteps                                                                                                   |
+| `--model-path`                                 | `models/sac_docking` | Where to save the model                                                                                                    |
+| `--resume`                                     | *(flag)*             | Continue from an existing model                                                                                            |
+| `--checkpoint-freq`                            | 10 000               | Steps between checkpoint saves                                                                                             |
+| `--checkpoint-dir`                             | `checkpoints`        | Directory for checkpoint files                                                                                             |
+| `--control-interval-steps`                     | 2                    | Base interval between real control clicks                                                                                  |
+| `--action-confirmation-steps`                  | 1                    | Consecutive same-intent steps required before click (non-high-risk)                                                        |
+| `--adaptive-control` / `--no-adaptive-control` | enabled              | Enable/disable risk-adaptive control authority                                                                             |
+| `--effect-guidance` / `--no-effect-guidance`   | enabled              | Toggle effect-guidance path (currently no behavioral override in `step`, action-effect stats are still collected/exported) |
+| `--shared-browser-tabs`                        | *(flag)*             | Use one shared browser with multiple tabs for multi-env runs                                                               |
+| `--num-envs`                                   | 5                    | Number of simulator environments to run in parallel                                                                        |
+| `--effect-export-freq`                         | 5000                 | Export learned action-effect summary every N timesteps                                                                     |
+| `--effect-export-dir`                          | `analysis/effects`   | Directory for action-effect JSON exports                                                                                   |
+
+When `--num-envs > 1`, training auto-enables managed browser mode
+(`--launch-browser`). Default multi-env behavior is one browser per env in
+subprocess parallel mode. Add `--shared-browser-tabs` to use one browser with
+multiple tabs instead. For manual-CDP training, set `--num-envs 1`.
 
 Example — resume a previous run in managed mode:
 
@@ -183,12 +208,15 @@ python evaluate.py --model models/sac_docking --episodes 10
 
 Optional arguments:
 
-| Argument | Default | Description |
-|---|---|---|
-| `--launch-browser` | *(flag)* | Let Playwright launch Chromium automatically |
-| `--headless` | *(flag)* | Run browser without a visible window (with `--launch-browser`) |
-| `--model` | `models/sac_docking` | Path to trained model |
-| `--episodes` | 10 | Number of evaluation episodes |
+| Argument           | Default              | Description                                                    |
+|--------------------|----------------------|----------------------------------------------------------------|
+| `--launch-browser` | *(flag)*             | Let Playwright launch Chromium automatically                   |
+| `--headless`       | *(flag)*             | Run browser without a visible window (with `--launch-browser`) |
+| `--model`          | `models/sac_docking` | Path to trained model                                          |
+| `--episodes`       | 10                   | Number of evaluation episodes                                  |
+
+Note: `evaluate.py` currently uses environment defaults for control cadence and
+confirmation behavior (`control_interval_steps=2`, `action_confirmation_steps=2`).
 
 ### Visualize learned action effects
 

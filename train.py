@@ -4,17 +4,19 @@ Training script for the SpaceX ISS Docking Simulator.
 Uses Soft Actor-Critic (SAC) from Stable-Baselines3 to train an agent on the
 browser-based SpaceX ISS Docking Simulator (https://iss-sim.spacex.com/).
 
-Only a single simulator instance can run at a time, so training is sequential
-(no parallel environments).  A checkpoint callback saves the model periodically,
-and the ``--resume`` flag lets you continue training from a previous run.
+Supports vectorized training with multiple simulator environments. By default,
+each environment runs in its own browser process (true parallelism via
+``SubprocVecEnv``). Optionally, you can use one shared browser with multiple
+tabs. A checkpoint callback saves the model periodically, and the ``--resume``
+flag lets you continue training from a previous run.
 
 Usage
 -----
-    # Auto-launch the browser (managed mode)
-    python train.py --launch-browser
+    # Default: 5 environments in parallel (one browser per env)
+    python train.py --headless
 
-    # Connect to a manually-opened Chrome instance (CDP mode, default)
-    python train.py
+    # Force single-environment CDP mode with a manually-opened Chrome
+    python train.py --num-envs 1
 
     # Resume from the latest saved model and replay buffer
     python train.py --launch-browser --resume --model-path models/sac_docking
@@ -35,12 +37,16 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Callable
 from typing import Any
 
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.callbacks import CheckpointCallback
-from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import VecEnv
+from stable_baselines3.common.vec_env import VecMonitor
 
 from docking import IssDockingEnv
 
@@ -130,6 +136,66 @@ class ExportActionEffectCallback(BaseCallback):
         return True
 
 
+def _make_env(
+    launch_browser: bool,
+    headless: bool,
+    shared_browser_tabs: bool,
+    expected_shared_tabs: int | None,
+    control_interval_steps: int,
+    action_confirmation_steps: int,
+    adaptive_control: bool,
+    effect_guidance: bool,
+) -> Callable[[], IssDockingEnv]:
+    """Return an env factory function for vectorized env creation."""
+
+    def _init() -> IssDockingEnv:
+        return IssDockingEnv(
+            launch_browser=launch_browser,
+            headless=headless,
+            shared_browser_tabs=shared_browser_tabs,
+            expected_shared_tabs=expected_shared_tabs,
+            control_interval_steps=control_interval_steps,
+            action_confirmation_steps=action_confirmation_steps,
+            adaptive_control=adaptive_control,
+            effect_guidance=effect_guidance,
+        )
+
+    return _init
+
+
+def _build_vec_env(
+    num_envs: int,
+    launch_browser: bool,
+    headless: bool,
+    shared_browser_tabs: bool,
+    expected_shared_tabs: int | None,
+    use_subproc_envs: bool,
+    control_interval_steps: int,
+    action_confirmation_steps: int,
+    adaptive_control: bool,
+    effect_guidance: bool,
+) -> VecEnv:
+    """Create vectorized training environment(s)."""
+    env_fns = [
+        _make_env(
+            launch_browser=launch_browser,
+            headless=headless,
+            shared_browser_tabs=shared_browser_tabs,
+            expected_shared_tabs=expected_shared_tabs,
+            control_interval_steps=control_interval_steps,
+            action_confirmation_steps=action_confirmation_steps,
+            adaptive_control=adaptive_control,
+            effect_guidance=effect_guidance,
+        )
+        for _ in range(num_envs)
+    ]
+
+    if num_envs > 1 and use_subproc_envs:
+        return VecMonitor(SubprocVecEnv(env_fns, start_method="spawn"))
+
+    return VecMonitor(DummyVecEnv(env_fns))
+
+
 def train(
     model_path: str,
     timesteps: int,
@@ -142,6 +208,8 @@ def train(
     action_confirmation_steps: int,
     adaptive_control: bool,
     effect_guidance: bool,
+    shared_browser_tabs: bool,
+    num_envs: int,
     effect_export_freq: int,
     effect_export_dir: str,
 ) -> None:
@@ -163,6 +231,7 @@ def train(
     launch_browser:
         If ``True``, Playwright launches a Chromium browser automatically.
         If ``False``, connect to an already-running Chrome via CDP.
+        Multi-environment runs auto-enable managed mode.
     headless:
         Only used when ``launch_browser=True``.  Run the browser without a
         visible window when ``True``.
@@ -177,20 +246,52 @@ def train(
         risk state (distance, attitude, angular rates, closing rate).
     effect_guidance:
         Enable learned button→state effect guidance for high-risk corrections.
+    shared_browser_tabs:
+        If ``True`` and ``num_envs > 1``, use one shared browser with multiple
+        tabs. If ``False`` (default), each environment uses its own browser.
+    num_envs:
+        Number of simulator environments to run in parallel.
     effect_export_freq:
         Export learned action-effect summary every N timesteps.
     effect_export_dir:
         Directory for exported action-effect summary JSON files.
     """
-    env = Monitor(
-        IssDockingEnv(
-            launch_browser=launch_browser,
-            headless=headless,
-            control_interval_steps=control_interval_steps,
-            action_confirmation_steps=action_confirmation_steps,
-            adaptive_control=adaptive_control,
-            effect_guidance=effect_guidance,
+    num_envs = max(1, int(num_envs))
+    if num_envs > 1 and not launch_browser:
+        logger.warning(
+            "num_envs=%d requires managed mode for parallel browser control. "
+            "Auto-enabling managed mode (--launch-browser).",
+            num_envs,
         )
+        launch_browser = True
+
+    shared_browser_tabs = bool(launch_browser and shared_browser_tabs and num_envs > 1)
+    expected_shared_tabs = num_envs if shared_browser_tabs else None
+    use_subproc_envs = bool(num_envs > 1 and not shared_browser_tabs)
+
+    if num_envs > 1 and not headless:
+        if shared_browser_tabs:
+            logger.warning(
+                "Running one visible browser with %d tabs. Consider --headless for lower overhead.",
+                num_envs,
+            )
+        else:
+            logger.warning(
+                "Running %d visible browser windows in parallel. Consider --headless for lower overhead.",
+                num_envs,
+            )
+
+    env = _build_vec_env(
+        num_envs=num_envs,
+        launch_browser=launch_browser,
+        headless=headless,
+        shared_browser_tabs=shared_browser_tabs,
+        expected_shared_tabs=expected_shared_tabs,
+        use_subproc_envs=use_subproc_envs,
+        control_interval_steps=control_interval_steps,
+        action_confirmation_steps=action_confirmation_steps,
+        adaptive_control=adaptive_control,
+        effect_guidance=effect_guidance,
     )
 
     # SB3's save_replay_buffer appends ".pkl" automatically; use the base path
@@ -202,8 +303,16 @@ def train(
         logger.info("Resuming training from '%s.zip' …", model_path)
         model = SAC.load(model_path, env=env)
         if os.path.exists(replay_buffer_file):
-            model.load_replay_buffer(replay_buffer_file)
-            logger.info("Replay buffer loaded from '%s'", replay_buffer_file)
+            try:
+                model.load_replay_buffer(replay_buffer_file)
+                logger.info("Replay buffer loaded from '%s'", replay_buffer_file)
+            except Exception as exc:
+                logger.warning(
+                    "Could not load replay buffer from '%s' (%s). "
+                    "Continuing with empty replay buffer.",
+                    replay_buffer_file,
+                    exc,
+                )
     else:
         logger.info("Starting fresh training …")
         model = SAC(
@@ -222,8 +331,18 @@ def train(
         )
 
     os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_freq_calls = max(1, checkpoint_freq // num_envs)
+    if checkpoint_freq_calls != checkpoint_freq:
+        logger.info(
+            "Adjusted checkpoint callback frequency to %d calls for %d envs "
+            "(target every ~%d timesteps).",
+            checkpoint_freq_calls,
+            num_envs,
+            checkpoint_freq,
+        )
+
     checkpoint_callback = CheckpointCallback(
-        save_freq=checkpoint_freq,
+        save_freq=checkpoint_freq_calls,
         save_path=checkpoint_dir,
         name_prefix="sac_docking",
         save_replay_buffer=True,
@@ -245,7 +364,14 @@ def train(
         model.save_replay_buffer(replay_buffer_base)
         logger.info("Progress saved (%s) to '%s.zip'", reason, model_path)
 
-    logger.info("Training SAC for %s timesteps …", f"{timesteps:,}")
+    logger.info(
+        "Training SAC for %s timesteps with %d environment(s)%s …",
+        f"{timesteps:,}",
+        num_envs,
+        " (one shared browser, multi-tab)"
+        if shared_browser_tabs
+        else " (one browser per env, subprocess parallel)",
+    )
     try:
         model.learn(
             total_timesteps=timesteps,
@@ -297,7 +423,8 @@ def main() -> None:
         action="store_true",
         help=(
             "Let Playwright launch a Chromium browser automatically. "
-            "When omitted, connect to an already-running Chrome via CDP."
+            "When omitted, connect to Chrome via CDP for --num-envs=1; "
+            "for --num-envs>1 managed mode is auto-enabled."
         ),
     )
     parser.add_argument(
@@ -314,7 +441,7 @@ def main() -> None:
     parser.add_argument(
         "--action-confirmation-steps",
         type=int,
-        default=2,
+        default=1,
         help="Require same intended command for N consecutive steps before executing (except high-risk states).",
     )
     parser.add_argument(
@@ -338,6 +465,23 @@ def main() -> None:
         dest="effect_guidance",
         action="store_false",
         help="Disable learned action-effect guidance.",
+    )
+    parser.add_argument(
+        "--shared-browser-tabs",
+        action="store_true",
+        help=(
+            "Use one shared browser with multiple tabs for --num-envs>1. "
+            "Default behavior is one browser per env in subprocess parallel mode."
+        ),
+    )
+    parser.add_argument(
+        "--num-envs",
+        type=int,
+        default=5,
+        help=(
+            "Number of simulator environments to run in parallel. "
+            "When >1, managed mode is enabled automatically."
+        ),
     )
     parser.add_argument(
         "--effect-export-freq",
@@ -366,6 +510,8 @@ def main() -> None:
         action_confirmation_steps=args.action_confirmation_steps,
         adaptive_control=args.adaptive_control,
         effect_guidance=args.effect_guidance,
+        shared_browser_tabs=args.shared_browser_tabs,
+        num_envs=args.num_envs,
         effect_export_freq=args.effect_export_freq,
         effect_export_dir=args.effect_export_dir,
     )
