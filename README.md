@@ -33,9 +33,9 @@ Both environments share the same observation/action interface.
 
 The policy outputs an array of 6 discrete values, one for each degree of freedom
 (Translation: X, Y, Z / Rotation: Roll, Pitch, Yaw). For each dimension:
-- `0`: NO_OP
-- `1`: Positive control (e.g. forward, up, right, roll_right, pitch_up, yaw_right)
-- `2`: Negative control (e.g. backward, down, left, roll_left, pitch_down, yaw_left)
+- `0`: `NO_OP`
+- `1`: Positive control (e.g. forward, up, right, `roll_right`, `pitch_up`, `yaw_right`)
+- `2`: Negative control (e.g. backward, down, left, `roll_left`, `pitch_down`, `yaw_left`)
 
 This allows simultaneous multi-axis commands in one step.
 
