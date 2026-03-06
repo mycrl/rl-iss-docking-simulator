@@ -124,11 +124,11 @@ Definitions:
 Core Terms:
 
 ```math
-R_{\text{step}} = R_{\text{action}} + R_{\text{progress}} + R_{\text{noop}} + R_{\text{safety}} + R_{\text{terminal}}$$
+R_{\text{step}} = R_{\text{action}} + R_{\text{progress}} + R_{\text{noop}} + R_{\text{safety}} + R_{\text{terminal}} \\
 
-R_{\text{action}} = -0.03\,|A| - 0.12\,N_{\text{quick\_repeat}} - 0.16\,N_{\text{direction\_flip}}$$
+R_{\text{action}} = -0.03\,|A| - 0.12\,N_{\text{quick\_repeat}} - 0.16\,N_{\text{direction\_flip}} \\
 
-R_{\text{progress}} = \sum_{d}\sum_{m\in\text{mapped}(d)} \mathbb{I}(\text{active}_d)\, s_d\,\mathrm{clip}(\Delta_{d,m}w_m,-0.8,0.8) + R_{\text{repeat}} + R_{\text{ineff}}$$
+R_{\text{progress}} = \sum_{d}\sum_{m\in\text{mapped}(d)} \mathbb{I}(\text{active}_d)\, s_d\,\mathrm{clip}(\Delta_{d,m}w_m,-0.8,0.8) + R_{\text{repeat}} + R_{\text{ineff}}
 ```
 
 Here, $s_d=0.35$ for translation dimensions and $s_d=1.0$ for rotation dimensions.
@@ -140,7 +140,7 @@ R_{\text{noop}} = \sum_{d}\sum_{m\in\text{mapped}(d)} \mathbb{I}(\neg\text{activ
 \mathrm{clip}(0.5\Delta_{d,m},0,0.25)
  + \mathbb{I}(\text{observe\_window}_d)\mathrm{clip}(0.8\Delta_{d,m},0,0.2)
  - \mathrm{clip}(0.35(\text{violation}_{d,m}-\Delta_{d,m}),0,0.25)
-\right]
+\right] \\
 
 \begin{aligned}
 R_{\text{safety}} =
@@ -151,13 +151,13 @@ R_{\text{safety}} =
 &-0.1\,\mathbb{I}(\text{range}>15\land 0\le\text{rate}<0.02)
  -\sum_{a\in\{roll,pitch,yaw\}} 0.8\,|\dot a - r_a^{*}| \\
 &-\sum_{a\in\{roll,pitch,yaw\}} (\,(|\dot a|-0.25)\cdot 12\,)^2\,\mathbb{I}(|\dot a|>0.25)
-\end{aligned}
+\end{aligned} \\
 
 \begin{aligned}
 r^{*}_{roll} &= \mathrm{clip}(-0.02\\,roll,-0.25,0.25),\\
 r^{*}_{pitch} &= \mathrm{clip}(0.02\\,pitch,-0.25,0.25),\\
 r^{*}_{yaw} &= \mathrm{clip}(0.02\\,yaw,-0.25,0.25)
-\end{aligned}
+\end{aligned} \\
 
 R_{\text{terminal}} = 1000\,\mathbb{I}(\text{success})
 -300\,\mathbb{I}(\text{fuel\_empty})
