@@ -139,13 +139,13 @@ Here, $s_d=0.35$ for translation dimensions and $s_d=1.0$ for rotation dimension
 $R_{\text{repeat}}$ is the repeated-command penalty (translation: $-0.08$, rotation: $-0.12$),
 and $R_{\text{ineff}}$ is the ineffective-rotation penalty ($-0.06$).
 
-$
+```math
 R_{\text{noop}} = \sum_{d}\sum_{m\in\text{mapped}(d)} \mathbb{I}(\neg\text{active}_d)\left[
 \mathrm{clip}(0.5\Delta_{d,m},0,0.25)
  + \mathbb{I}(\text{observe\_window}_d)\mathrm{clip}(0.8\Delta_{d,m},0,0.2)
  - \mathrm{clip}(0.35(\text{violation}_{d,m}-\Delta_{d,m}),0,0.25)
 \right]
-$
+```
 
 ```math
 \begin{aligned}
@@ -168,12 +168,12 @@ r^{*}_{yaw} &= \mathrm{clip}(0.02\\,yaw,-0.25,0.25)
 \end{aligned}
 ```
 
-$
+```math
 R_{\text{terminal}} = 1000\,\mathbb{I}(\text{success})
 -300\,\mathbb{I}(\text{fuel\_empty})
 -500\,\mathbb{I}(\text{rate}>0.8)
 -1000\,\mathbb{I}(\text{range}>350\ \lor\ \exists a\in\{roll,pitch,yaw\}:|a|>30)
-$
+```
 
 ### Algorithm
 
