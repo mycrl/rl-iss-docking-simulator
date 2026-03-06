@@ -155,16 +155,16 @@ R_{\text{safety}} =
 &-(\,(0.02-\text{rate})\cdot 20\,)^2\,\mathbb{I}(0\le \text{rate}<0.02)
 -(\,(\text{rate}-0.2)\cdot 30\,)^2\,\mathbb{I}(\text{rate}>0.2) \\
 &-0.1\,\mathbb{I}(\text{range}>15\land 0\le\text{rate}<0.02)
--\sum_{a\in\{roll,pitch,yaw\}} 0.8\,|\dot a-r_a^*| \\
+ -\sum_{a\in\{roll,pitch,yaw\}} 0.8\,|\dot a - r_a^{*}| \\
 &-\sum_{a\in\{roll,pitch,yaw\}} (\,(|\dot a|-0.25)\cdot 12\,)^2\,\mathbb{I}(|\dot a|>0.25)
 \end{aligned}
 $$
 
 $$
 \begin{aligned}
-r^*_{roll} &= \mathrm{clip}(-0.02\\,roll,-0.25,0.25),\\
-r^*_{pitch} &= \mathrm{clip}(0.02\\,pitch,-0.25,0.25),\\
-r^*_{yaw} &= \mathrm{clip}(0.02\\,yaw,-0.25,0.25)
+r^{*}_{roll} &= \mathrm{clip}(-0.02\\,roll,-0.25,0.25),\\
+r^{*}_{pitch} &= \mathrm{clip}(0.02\\,pitch,-0.25,0.25),\\
+r^{*}_{yaw} &= \mathrm{clip}(0.02\\,yaw,-0.25,0.25)
 \end{aligned}
 $$
 
