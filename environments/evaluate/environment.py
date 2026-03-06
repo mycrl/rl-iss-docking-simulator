@@ -52,6 +52,14 @@ class EvalIssDockingEnv(gym.Env):
     MAX_SAFE_RATE: float = 0.2   # m/s
     NEAR_DISTANCE: float = 5.0   # metres
     ATTITUDE_KEYS: tuple[str, ...] = ("roll", "yaw", "pitch")
+    ACTION_MAP: dict[int, dict[int, str]] = {
+        0: {1: "translate_forward", 2: "translate_backward"},
+        1: {1: "translate_up", 2: "translate_down"},
+        2: {1: "translate_right", 2: "translate_left"},
+        3: {1: "roll_right", 2: "roll_left"},
+        4: {1: "pitch_up", 2: "pitch_down"},
+        5: {1: "yaw_right", 2: "yaw_left"},
+    }
 
     def __init__(
         self,
@@ -94,16 +102,7 @@ class EvalIssDockingEnv(gym.Env):
         self.fuel_remaining: float = self.INITIAL_FUEL
         self._prev_state = {}
 
-        self._action_map = {
-            0: {1: "translate_forward", 2: "translate_backward"},
-            1: {1: "translate_up", 2: "translate_down"},
-            2: {1: "translate_right", 2: "translate_left"},
-            3: {1: "roll_right", 2: "roll_left"},
-            4: {1: "pitch_up", 2: "pitch_down"},
-            5: {1: "yaw_right", 2: "yaw_left"},
-        }
-
-    def reset(self, *, seed=None, options=None):
+    def reset(self, *, seed=None):
         super().reset(seed=seed)
         self._browser.reset(wait=self.reset_wait)
         self._steps = 0
@@ -119,8 +118,8 @@ class EvalIssDockingEnv(gym.Env):
         for dim, act_val in enumerate(action):
             act_val = int(act_val)
             if act_val in (1, 2):
-                btn = self._action_map[dim][act_val]
-                self._browser.click_action(btn)
+                action_name = self.ACTION_MAP[dim][act_val]
+                self._browser.click_action(action_name)
                 button_presses += 1
 
         if button_presses > 0:

@@ -7,10 +7,11 @@ locally at thousands of steps per second without Playwright or a browser.
 """
 
 import logging
-import math
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+
+from .simulator import TrainDockingSimulator
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +51,14 @@ class TrainIssDockingEnv(gym.Env):
     MAX_SAFE_RATE: float = 0.2   # m/s
     NEAR_DISTANCE: float = 5.0   # metres
     ATTITUDE_KEYS: tuple[str, ...] = ("roll", "yaw", "pitch")
-    HARD_START_PROB: float = 0.35
-    TRANSLATION_EFFECT_DELAY_STEPS: int = 3
-    TRANSLATION_OBSERVE_WINDOW_STEPS: int = 4
-    TRANSLATION_FIRST_PULSE_SCALE: float = 0.6
-    TRANSLATION_SECOND_PULSE_SCALE: float = 0.85
-    TRANSLATION_REVERSE_SCALE: float = 0.5
+    ACTION_MAP: dict[int, dict[int, str]] = {
+        0: {1: "translate_forward", 2: "translate_backward"},
+        1: {1: "translate_up", 2: "translate_down"},
+        2: {1: "translate_right", 2: "translate_left"},
+        3: {1: "roll_right", 2: "roll_left"},
+        4: {1: "pitch_up", 2: "pitch_down"},
+        5: {1: "yaw_right", 2: "yaw_left"},
+    }
     TRANSLATION_QUICK_REPEAT_PENALTY: float = 0.12
     TRANSLATION_DIRECTION_FLIP_PENALTY: float = 0.16
     METRIC_REWARD_WEIGHTS: dict[str, float] = {
@@ -98,81 +101,15 @@ class TrainIssDockingEnv(gym.Env):
         self.fuel_remaining: float = self.INITIAL_FUEL
         self._prev_state = {}
         self._prev_action: np.ndarray = np.zeros(6, dtype=np.int8)
-        self._translation_pending: list[tuple[int, np.ndarray, int]] = []
-        self._translation_last_command_step = np.full(3, -10_000, dtype=np.int32)
-        self._translation_last_command_value = np.zeros(3, dtype=np.int8)
-        self._translation_command_streak = np.zeros(3, dtype=np.int16)
+        self._sim = TrainDockingSimulator(dt=self.dt)
+        self.state_vars: dict[str, float] = {}
 
-        # Defines impulses for each action
-        # Translating imparts velocity. Rotating imparts angular velocity.
-        self.TRANSLATION_PULSE = 0.06  # m/s per click
-        self.ROTATION_PULSE = 0.1      # deg/s per click
-
-    def reset(self, *, seed=None, options=None):
+    def reset(self, *, seed=None):
         super().reset(seed=seed)
         self._steps = 0
-        self.fuel_used = 0
-        self.fuel_remaining = self.INITIAL_FUEL
         self._prev_action.fill(0)
-        self._translation_pending.clear()
-        self._translation_last_command_step.fill(-10_000)
-        self._translation_last_command_value.fill(0)
-        self._translation_command_streak.fill(0)
-
-        # Domain-randomized spawn: include both near-aligned and strongly
-        # off-axis starts so policy does not overfit to one reset pattern.
-        hard_start = bool(self.np_random.random() < self.HARD_START_PROB)
-
-        if hard_start:
-            x = self.np_random.uniform(90.0, 260.0)
-            y = self.np_random.uniform(-90.0, 90.0)
-            z = self.np_random.uniform(-90.0, 90.0)
-            vx = self.np_random.uniform(-0.12, 0.08)
-            vy = self.np_random.uniform(-0.08, 0.08)
-            vz = self.np_random.uniform(-0.08, 0.08)
-
-            roll = self.np_random.uniform(-25.0, 25.0)
-            pitch = self.np_random.uniform(-25.0, 25.0)
-            yaw = self.np_random.uniform(-25.0, 25.0)
-            roll_rate = self.np_random.uniform(-0.7, 0.7)
-            pitch_rate = self.np_random.uniform(-0.7, 0.7)
-            yaw_rate = self.np_random.uniform(-0.7, 0.7)
-        else:
-            x = self.np_random.uniform(170.0, 230.0)
-            y = self.np_random.uniform(-25.0, 25.0)
-            z = self.np_random.uniform(-25.0, 25.0)
-            vx = self.np_random.uniform(-0.05, 0.03)
-            vy = self.np_random.uniform(-0.03, 0.03)
-            vz = self.np_random.uniform(-0.03, 0.03)
-
-            roll = self.np_random.uniform(-18.0, 18.0)
-            pitch = self.np_random.uniform(-18.0, 18.0)
-            yaw = self.np_random.uniform(-18.0, 18.0)
-            roll_rate = self.np_random.uniform(-0.3, 0.3)
-            pitch_rate = self.np_random.uniform(-0.3, 0.3)
-            yaw_rate = self.np_random.uniform(-0.3, 0.3)
-
-        self.state_vars = {
-            "x": x,
-            "vx": vx,
-            "y": y,
-            "vy": vy,
-            "z": z,
-            "vz": vz,
-            "roll": roll,
-            "roll_rate": roll_rate,
-            "pitch": pitch,
-            "pitch_rate": pitch_rate,
-            "yaw": yaw,
-            "yaw_rate": yaw_rate,
-        }
-
-        self.state_vars["range"] = math.sqrt(x**2 + y**2 + z**2)
-        if self.state_vars["range"] > 1e-6:
-            radial_velocity = (x * vx + y * vy + z * vz) / self.state_vars["range"]
-        else:
-            radial_velocity = 0.0
-        self.state_vars["rate"] = radial_velocity
+        self._sim.reset(self.np_random)
+        self._sync_from_sim()
 
         obs = self._get_obs()
         self._prev_state = self._obs_to_dict(obs)
@@ -180,120 +117,19 @@ class TrainIssDockingEnv(gym.Env):
 
     def step(self, action: np.ndarray):
         step_idx = self._steps
-        button_presses = 0
-        active_dims = set()
-        quick_repeat_translation_dims: set[int] = set()
-        flip_translation_dims: set[int] = set()
-        
-        # Process actions (apply impulses)
-        for dim, act_val in enumerate(action):
-            act_val = int(act_val)
+        for dim, act_val_raw in enumerate(action):
+            act_val = int(act_val_raw)
             if act_val in (1, 2):
-                button_presses += 1
-                active_dims.add(dim)
-                
-                direction = 1 if act_val == 1 else -1
+                action_name = self.ACTION_MAP[dim][act_val]
+                self._sim.click_action(action_name)
 
-                if dim in (0, 1, 2):
-                    axis_idx = dim
-                    since_last_cmd = step_idx - int(self._translation_last_command_step[axis_idx])
-                    prev_cmd = int(self._translation_last_command_value[axis_idx])
-
-                    if 0 <= since_last_cmd <= self.TRANSLATION_OBSERVE_WINDOW_STEPS:
-                        quick_repeat_translation_dims.add(axis_idx)
-
-                    recent_flip = (
-                        prev_cmd in (1, 2)
-                        and prev_cmd != act_val
-                        and 0 <= since_last_cmd <= self.TRANSLATION_OBSERVE_WINDOW_STEPS
-                    )
-                    if recent_flip:
-                        flip_translation_dims.add(axis_idx)
-
-                    if prev_cmd == act_val:
-                        self._translation_command_streak[axis_idx] += 1
-                    else:
-                        self._translation_command_streak[axis_idx] = 1
-
-                    self._translation_last_command_step[axis_idx] = step_idx
-                    self._translation_last_command_value[axis_idx] = act_val
-
-                    pulse_scale = 1.0
-                    if self._translation_command_streak[axis_idx] == 1:
-                        pulse_scale *= self.TRANSLATION_FIRST_PULSE_SCALE
-                    elif self._translation_command_streak[axis_idx] == 2:
-                        pulse_scale *= self.TRANSLATION_SECOND_PULSE_SCALE
-                    if recent_flip:
-                        pulse_scale *= self.TRANSLATION_REVERSE_SCALE
-
-                    # Translation commands are defined in spacecraft body frame.
-                    # Projecting them into world frame creates realistic axis
-                    # coupling when attitude is not perfectly aligned.
-                    if dim == 0:      # Forward / backward
-                        body_vec = np.array([-direction, 0.0, 0.0], dtype=np.float32)
-                    elif dim == 1:    # Up / down
-                        body_vec = np.array([0.0, 0.0, direction], dtype=np.float32)
-                    else:             # Right / left
-                        body_vec = np.array([0.0, direction, 0.0], dtype=np.float32)
-
-                    world_vec = self._body_to_world(
-                        body_vec,
-                        roll_deg=self.state_vars["roll"],
-                        pitch_deg=self.state_vars["pitch"],
-                        yaw_deg=self.state_vars["yaw"],
-                    )
-                    delta_v = world_vec * (self.TRANSLATION_PULSE * pulse_scale)
-                    self._translation_pending.append(
-                        (
-                            self.TRANSLATION_EFFECT_DELAY_STEPS,
-                            delta_v.astype(np.float32),
-                            axis_idx,
-                        )
-                    )
-                elif dim == 3: # Roll Right(1)/Left(2) -> right increases displayed roll_rate
-                    self.state_vars["roll_rate"] += direction * self.ROTATION_PULSE
-                elif dim == 4: # Pitch Up(1)/Down(2) -> up decreases displayed pitch_rate
-                    self.state_vars["pitch_rate"] -= direction * self.ROTATION_PULSE
-                elif dim == 5: # Yaw Right(1)/Left(2) -> right increases displayed yaw_rate
-                    self.state_vars["yaw_rate"] += direction * self.ROTATION_PULSE
-        if button_presses > 0:
-            fuel_spent = button_presses * self.FUEL_PER_BUTTON
-            self.fuel_used += int(fuel_spent)
-            self.fuel_remaining = max(0.0, self.fuel_remaining - fuel_spent)
-
+        self._sync_from_sim(drive=True)
         self._steps += 1
 
-        # Delayed translation actuation: pulses affect velocity after a short lag.
-        pending_next: list[tuple[int, np.ndarray, int]] = []
-        for wait_steps, delta_v, axis_idx in self._translation_pending:
-            if wait_steps <= 0:
-                self.state_vars["vx"] += float(delta_v[0])
-                self.state_vars["vy"] += float(delta_v[1])
-                self.state_vars["vz"] += float(delta_v[2])
-            else:
-                pending_next.append((wait_steps - 1, delta_v, axis_idx))
-        self._translation_pending = pending_next
-
-        # Euler integrate Physics!
-        # Save range for rate calculation
-        old_range = self.state_vars["range"]
-
-        # Positions
-        self.state_vars["x"] += self.state_vars["vx"] * self.dt
-        self.state_vars["y"] += self.state_vars["vy"] * self.dt
-        self.state_vars["z"] += self.state_vars["vz"] * self.dt
-        
-        # Axis convention in the real simulator is asymmetric:
-        # - roll angle follows roll_rate sign directly
-        # - pitch/yaw angles change opposite to their displayed rates.
-        self.state_vars["roll"] += self.state_vars["roll_rate"] * self.dt
-        self.state_vars["pitch"] -= self.state_vars["pitch_rate"] * self.dt
-        self.state_vars["yaw"] -= self.state_vars["yaw_rate"] * self.dt
-
-        # Recalculate Range & Rate
-        new_range = math.sqrt(self.state_vars["x"]**2 + self.state_vars["y"]**2 + self.state_vars["z"]**2)
-        self.state_vars["range"] = new_range
-        self.state_vars["rate"] = (new_range - old_range) / self.dt
+        button_presses = int(self._sim.button_presses)
+        active_dims = set(self._sim.active_dims)
+        quick_repeat_translation_dims = set(self._sim.quick_repeat_translation_dims)
+        flip_translation_dims = set(self._sim.flip_translation_dims)
 
         obs = self._get_obs()
         state = self._obs_to_dict(obs)
@@ -372,8 +208,8 @@ class TrainIssDockingEnv(gym.Env):
                     violation = self._metric_violation(metric, state)
                     observe_window = (
                         dim < 3
-                        and 0 < (step_idx - int(self._translation_last_command_step[dim]))
-                        <= self.TRANSLATION_OBSERVE_WINDOW_STEPS
+                        and 0 < (step_idx - int(self._sim.translation_last_command_step[dim]))
+                        <= self._sim.TRANSLATION_OBSERVE_WINDOW_STEPS
                     )
                     if improvement > 0.0:
                         hold_reward = float(np.clip(improvement * 0.5, 0.0, 0.25))
@@ -490,7 +326,7 @@ class TrainIssDockingEnv(gym.Env):
             "fuel_remaining": float(self.fuel_remaining),
             "success": success,
             "button_presses": int(button_presses),
-            "translation_pending_pulses": int(len(self._translation_pending)),
+            "translation_pending_pulses": int(len(self._sim.translation_pending)),
             "reward_components": reward_components,
             "progress_component_scores": progress_component_scores,
             "noop_component_scores": noop_component_scores,
@@ -500,6 +336,11 @@ class TrainIssDockingEnv(gym.Env):
 
     def close(self) -> None:
         pass # No browser to close!
+
+    def _sync_from_sim(self, drive: bool = False) -> None:
+        self.state_vars = self._sim.read_state() if drive else self._sim.get_state_snapshot()
+        self.fuel_used = self._sim.fuel_used
+        self.fuel_remaining = self._sim.fuel_remaining
 
     def _get_obs(self) -> np.ndarray:
         obs = np.array(
@@ -535,41 +376,6 @@ class TrainIssDockingEnv(gym.Env):
     @staticmethod
     def _add_reward_component(components: dict[str, float], key: str, value: float) -> None:
         components[key] = components.get(key, 0.0) + float(value)
-
-    @staticmethod
-    def _body_to_world(
-        body_vec: np.ndarray,
-        roll_deg: float,
-        pitch_deg: float,
-        yaw_deg: float,
-    ) -> np.ndarray:
-        """Rotate a body-frame vector into world frame using Z-Y-X Euler order."""
-        roll = math.radians(roll_deg)
-        pitch = math.radians(pitch_deg)
-        yaw = math.radians(yaw_deg)
-
-        cr = math.cos(roll)
-        sr = math.sin(roll)
-        cp = math.cos(pitch)
-        sp = math.sin(pitch)
-        cy = math.cos(yaw)
-        sy = math.sin(yaw)
-
-        rx = np.array(
-            [[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]],
-            dtype=np.float32,
-        )
-        ry = np.array(
-            [[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]],
-            dtype=np.float32,
-        )
-        rz = np.array(
-            [[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]],
-            dtype=np.float32,
-        )
-
-        rot = rz @ ry @ rx
-        return rot @ body_vec
 
     @staticmethod
     def _is_docked(state: dict[str, float]) -> bool:

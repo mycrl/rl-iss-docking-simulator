@@ -1,4 +1,4 @@
-"""Dragon spacecraft ISS docking simulator environments."""
+"""Dragon spacecraft ISS docking simulator evaluation environment."""
 
 from .environment import EvalIssDockingEnv
 
