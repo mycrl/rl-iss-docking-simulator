@@ -586,6 +586,12 @@ class SimulatorBrowser:
             else:
                 logger.info("Connected to simulator page: %s", self._page.url)
 
+        # NOTE: In CDP mode we heuristically pick a page from the first
+        # browser context. This is fragile: if multiple unrelated pages are
+        # open, the simulator may not be the one selected. The caller should
+        # ensure the simulator page is open or use the `cdp_url` for a
+        # dedicated browser instance.
+
     def disconnect(self) -> None:
         """Close the CDP connection and release Playwright resources."""
         if self._launch and self._shared_launch:
@@ -723,6 +729,9 @@ class SimulatorBrowser:
             # The DOM includes units (e.g. "200.0 m", "15.0°", "0.039 m/s").
             # Extract just the leading numeric token (with optional sign).
             # SpaceX UI uses a typographic minus sign (U+2212) instead of a standard hyphen!
+            # The DOM includes units (e.g. "200.0 m", "15.0°", "0.039 m/s").
+            # Extract just the leading numeric token (with optional sign).
+            # SpaceX UI uses a typographic minus sign (U+2212) instead of a standard hyphen!
             match = re.search(r"[-−]?\d+\.?\d*", text)
             try:
                 if match:
@@ -739,6 +748,11 @@ class SimulatorBrowser:
                 )
                 state[key] = 0.0
         return state
+
+    # WARNING: The simulator's DOM structure and CSS selectors may change at
+    # any time. Maintain the `STATE_SELECTORS` mapping and unit-parsing
+    # logic when the simulator UI is updated. Tests that replay browser
+    # traces should validate these selectors frequently.
 
     # ------------------------------------------------------------------
     # Terminal-state helpers

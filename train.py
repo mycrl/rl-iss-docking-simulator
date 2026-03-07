@@ -81,6 +81,13 @@ def _get_tensorboard_log_dir() -> str | None:
 
 
 class SaveOnSuccessCallback(BaseCallback):
+    """Callback that saves the model whenever an episode ends in success.
+
+    The callback inspects the `infos` returned by the environment for a
+    `success` flag (boolean). When a finished episode reports success, the
+    current model is saved using a safe save helper to avoid transient
+    filesystem errors on Windows.
+    """
     def __init__(self, model_path: str, verbose: int = 0) -> None:
         super().__init__(verbose)
         self.model_path = model_path
@@ -107,6 +114,12 @@ class SaveOnSuccessCallback(BaseCallback):
 
 
 class SafeCheckpointCallback(BaseCallback):
+    """Periodic checkpoint callback with robust saving.
+
+    Saves the model every `save_freq` calls to the given `save_path` with the
+    provided `name_prefix`. Uses the `_safe_save_model` wrapper to retry on
+    transient errors and log failures.
+    """
     def __init__(self, save_freq: int, save_path: str, name_prefix: str, verbose: int = 0) -> None:
         super().__init__(verbose)
         self.save_freq = max(1, int(save_freq))
@@ -128,8 +141,14 @@ class SafeCheckpointCallback(BaseCallback):
 
 
 def _make_env() -> Callable[[], gym.Env]:
+    """Factory returning a callable that creates a single `TrainIssDockingEnv`.
+
+    This is used by the vectorized environment constructors (Dummy/Subproc)
+    which expect a no-argument callable that produces a fresh env instance.
+    """
     def _init() -> gym.Env:
         return TrainIssDockingEnv()
+
     return _init
 
 
@@ -138,6 +157,17 @@ def _build_vec_env(
     use_subproc_envs: bool,
     model_path: str = "models/ppo_docking",
 ) -> VecEnv:
+    """Construct a vectorized, monitored and normalized environment.
+
+    - Creates `num_envs` copies of the fast Python environment.
+    - Chooses `SubprocVecEnv` when `use_subproc_envs` is True and multiple
+        envs are requested; otherwise uses `DummyVecEnv`.
+    - Wraps with `VecMonitor` to record episode statistics and with
+        `VecNormalize` to normalize observations and rewards. If normalization
+        stats exist on disk they will be loaded so training can resume steadily.
+    """
+    # Create factory callables for each parallel env. Each callable must
+    # produce a fresh environment instance when called by the vector wrapper.
     env_fns = [_make_env() for _ in range(num_envs)]
 
     if num_envs > 1 and use_subproc_envs:
@@ -148,9 +178,14 @@ def _build_vec_env(
     vec_env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
     
     stats_path = model_path + "_vec_normalize.pkl"
+    # If normalization statistics exist from a previous run, load them so
+    # observation/reward scaling remains consistent across resume sessions.
+    # Note: VecNormalize.load requires passing the underlying env used for
+    # runtime wrapping, so we reload into the current `env` instance.
     if os.path.exists(stats_path):
         logger.info(f"Loading environment normalization stats from {stats_path}")
         vec_env = VecNormalize.load(stats_path, env)
+        # Ensure the wrapper stays in training mode while learning resumes.
         vec_env.training = True
         
     return vec_env
@@ -164,6 +199,16 @@ def train(
     checkpoint_dir: str,
     num_envs: int,
 ) -> None:
+    """Train a PPO agent using the configured environment and callbacks.
+
+    Args:
+        model_path: Base path (without .zip) to save/load the policy.
+        timesteps: Total number of timesteps to learn for.
+        resume: If True, attempt to resume from an existing checkpoint.
+        checkpoint_freq: How often (in environment steps) to save checkpoints.
+        checkpoint_dir: Directory where checkpoints are written.
+        num_envs: Number of parallel environments to use.
+    """
     num_envs = max(1, int(num_envs))
     use_subproc_envs = bool(num_envs > 1)
 
@@ -193,6 +238,10 @@ def train(
 
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_freq_calls = max(1, checkpoint_freq // num_envs)
+    # checkpoint_freq is expressed in environment *steps*. When using
+    # vectorized envs, `model.learn` advances `num_envs` observations per
+    # algorithm step. We divide by `num_envs` so that checkpoints are saved
+    # approximately every `checkpoint_freq` environment steps in total.
 
     checkpoint_callback = SafeCheckpointCallback(
         save_freq=checkpoint_freq_calls,
@@ -234,6 +283,7 @@ def train(
 
 
 def main() -> None:
+    """CLI entrypoint: parse arguments and start training."""
     parser = argparse.ArgumentParser(
         description="Fast Train a PPO agent on the pure Python SpaceX ISS Docking Simulator.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

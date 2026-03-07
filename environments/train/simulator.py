@@ -57,6 +57,12 @@ class TrainDockingSimulator:
         self._step_open: bool = False
 
     def reset(self, np_random: Any) -> None:
+        """Reset simulator state to a new random initial condition.
+
+        `np_random` is a numpy RandomState-like object used to sample a
+        randomized initial pose/velocity. This method resets internal
+        bookkeeping such as pending translation pulses and fuel counters.
+        """
         self.fuel_used = 0
         self.fuel_remaining = self.INITIAL_FUEL
 
@@ -183,6 +189,12 @@ class TrainDockingSimulator:
             self.fuel_used = 0
 
     def click_action(self, action_name: str) -> None:
+        """Apply a discrete button-press action by name.
+
+        Actions are the human-readable names used by the browser UI. This
+        method maps them to internal translation/rotation updates, tracks
+        fuel consumption, and records which control dimensions are active.
+        """
         if action_name not in self.ACTION_TO_DIM:
             raise ValueError(f"Unsupported action '{action_name}'.")
         if action_name == "noop":
@@ -223,6 +235,11 @@ class TrainDockingSimulator:
         self.fuel_remaining = max(0.0, self.fuel_remaining - fuel_spent)
 
     def integrate(self) -> None:
+        """Advance continuous state by one simulator time-step.
+
+        Applies any pending delayed translation pulses, integrates linear
+        and angular motion and updates range/rate derived quantities.
+        """
         pending_next: list[tuple[int, np.ndarray, int]] = []
         for wait_steps, delta_v, axis_idx in self.translation_pending:
             if wait_steps <= 0:
@@ -250,7 +267,12 @@ class TrainDockingSimulator:
         self.state_vars["rate"] = (new_range - old_range) / self.dt
 
     def read_state(self) -> dict[str, float]:
-        # read_state is the driver: each call advances one simulator step.
+        """Return the current observable state and advance simulation time.
+
+        This is the primary driver used by the environment loop: calling
+        `read_state()` integrates the simulator forward one step and
+        returns a snapshot of observable state variables.
+        """
         if not self._step_open:
             self._clear_step_flags()
         self.integrate()
@@ -263,6 +285,22 @@ class TrainDockingSimulator:
         return dict(self.state_vars)
 
     def _apply_translation(self, axis_idx: int, act_val: int) -> None:
+        """Schedule a delayed translation pulse along one body axis.
+
+        This method encodes several subtle interactions that mirror the real
+        simulator's (noisy) control behaviour:
+
+        - Repeated presses in the same direction apply reduced or scaled
+            pulses depending on the current `translation_command_streak`.
+        - Rapid flips in direction are detected and scaled differently to
+            model actuator backlash and operator correction behaviour.
+        - Pulses are scheduled with a small delay (`TRANSLATION_EFFECT_DELAY_STEPS`)
+            rather than applied immediately to mimic actuator latency; callers
+            must therefore account for delayed translation responses.
+
+        The produced body-frame `delta_v` is rotated into the world frame
+        using `_body_to_world` before being queued in `translation_pending`.
+        """
         since_last_cmd = self._step_idx - int(self.translation_last_command_step[axis_idx])
         prev_cmd = int(self.translation_last_command_value[axis_idx])
 
@@ -353,4 +391,9 @@ class TrainDockingSimulator:
             dtype=np.float32,
         )
 
+        # Note: rotation order is Z * Y * X (yaw then pitch then roll). The
+        # composed rotation matrix is applied to a body-frame vector to produce
+        # a world-frame delta. Changing the rotation order will alter the
+        # applied direction — keep this consistent with any browser-side
+        # coordinate transforms when comparing traces.
         return (rz @ ry @ rx) @ body_vec
