@@ -88,6 +88,11 @@ class EvalIssDockingEnv(gym.Env):
             shared_launch=shared_browser_tabs,
             expected_shared_tabs=expected_shared_tabs,
         )
+        # Connect will either launch a managed browser or attach via CDP.
+        # Managed mode (launch=True) is less fragile but requires Playwright
+        # and Chromium. CDP mode expects a user-launched Chrome with
+        # remote debugging enabled and can be useful for headful interactive
+        # debugging or when Playwright is not available.
         self._browser.connect()
 
         self.action_space = spaces.MultiDiscrete([3, 3, 3, 3, 3, 3])
@@ -167,6 +172,12 @@ class EvalIssDockingEnv(gym.Env):
         }
 
         return obs, float(reward), terminated, truncated, info
+
+    # Note: This evaluation wrapper intentionally omits reward shaping to
+    # reflect only terminal success/failure. When reproducing browser traces
+    # ensure that `fuel_remaining` is kept in sync with the DOM-read values
+    # otherwise episode termination conditions may diverge from recorded
+    # traces.
 
     def close(self) -> None:
         self._browser.disconnect()

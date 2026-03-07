@@ -105,6 +105,12 @@ class TrainIssDockingEnv(gym.Env):
         self.state_vars: dict[str, float] = {}
 
     def reset(self, *, seed=None):
+        """Reset environment and simulator, returning initial observation.
+
+        Resets internal episode counters, simulator state and returns the
+        initial observation array plus an empty info dict, matching
+        Gymnasium's API (obs, info).
+        """
         super().reset(seed=seed)
         self._steps = 0
         self._prev_action.fill(0)
@@ -116,6 +122,13 @@ class TrainIssDockingEnv(gym.Env):
         return obs, {}
 
     def step(self, action: np.ndarray):
+        """Apply `action`, advance the simulator, compute reward and info.
+
+        The action is a 6-dim MultiDiscrete vector where each element is
+        0=no-op, 1=positive button, 2=negative button. This method drives
+        the simulator, computes shaped rewards, terminal conditions and
+        returns `(obs, reward, terminated, truncated, info)`.
+        """
         step_idx = self._steps
         for dim, act_val_raw in enumerate(action):
             act_val = int(act_val_raw)
@@ -170,12 +183,20 @@ class TrainIssDockingEnv(gym.Env):
             5: ("yaw", "yaw_rate"),
         }
 
+        # Per-dimension progress/penalty signals
+        # Each action dimension maps to a small set of metrics it is expected
+        # to influence. The reward design intentionally localises credit so
+        # that e.g. translation controls primarily get credit for range/rate
+        # improvements while rotational controls get angular metrics.
         for dim, metrics in dim_to_metrics.items():
             act_val = int(action[dim])
             is_active = act_val in (1, 2)
             prev_same_dir = bool(self._prev_action[dim] == act_val and is_active)
 
             for metric in metrics:
+                # `improvement` is a delta in the metric violation score
+                # (positive means the metric became *less* violated).
+                # It is clipped and weighted to produce bounded progress signals.
                 improvement = self._metric_improvement(metric, self._prev_state, state)
                 weight = self.METRIC_REWARD_WEIGHTS.get(metric, 1.0)
                 progress_score = float(np.clip(improvement * weight, -0.8, 0.8))
@@ -191,6 +212,10 @@ class TrainIssDockingEnv(gym.Env):
                         local_progress,
                     )
                     # If metric already improving, repeating same direction is over-excited.
+                    # Penalise repeated presses in the same direction that
+                    # appear to over-excite an already-improving metric.
+                    # For translation axes this penalty is smaller since
+                    # translation effects are delayed and require patience.
                     if improvement > 0.0 and prev_same_dir:
                         repeat_penalty = -0.08 if dim < 3 else -0.12
                         self._add_reward_component(
@@ -198,6 +223,8 @@ class TrainIssDockingEnv(gym.Env):
                             f"repeat_dim{dim}_{metric}",
                             repeat_penalty,
                         )
+                    # For rotation axes, if the metric isn't improving we
+                    # nudge the policy away from ineffective repeated inputs.
                     if improvement <= 0.0 and dim >= 3:
                         self._add_reward_component(
                             reward_components,
@@ -226,6 +253,8 @@ class TrainIssDockingEnv(gym.Env):
                                 f"observe_dim{dim}_{metric}",
                                 observe_reward,
                             )
+                    # When idle (no press) and the metric is worsening, apply
+                    # a lazy-penalty to encourage corrective action.
                     elif violation > 0.0:
                         lazy_penalty = -float(np.clip((violation + (-improvement)) * 0.35, 0.0, 0.25))
                         noop_component_scores[f"dim{dim}_{metric}"] = lazy_penalty
@@ -243,6 +272,10 @@ class TrainIssDockingEnv(gym.Env):
         # Global approach-rate safety shaping: regardless of distance, heavily
         # discourage unsafe closing speed beyond configured limit.
         # Per requested rule: rate can be negative physically, but negative means backing away and is penalized.
+        # Important: negative `rate` indicates the vehicle is moving away
+        # from the docking port (backing off). This is strongly penalised
+        # because the task requires closing to dock. The penalty grows
+        # quadratically to heavily discourage policies that back away.
         if state["rate"] < 0.0:
             reverse_speed = -state["rate"]
             self._add_reward_component(
@@ -295,6 +328,8 @@ class TrainIssDockingEnv(gym.Env):
         success = False
 
         if self._is_docked(state):
+            # Very large positive terminal bonus on success to ensure the
+            # sparse objective dominates local shaping when docking occurs.
             self._add_reward_component(reward_components, "terminal_success", 1000.0)
             terminated = True
             success = True
@@ -335,14 +370,24 @@ class TrainIssDockingEnv(gym.Env):
         return obs, reward, terminated, truncated, info
 
     def close(self) -> None:
-        pass # No browser to close!
+        # No external resources to release for the pure-Python env.
+        pass
 
     def _sync_from_sim(self, drive: bool = False) -> None:
+        """Update environment-visible `state_vars` from the simulator.
+
+        If `drive` is True, advance the simulator by one step; otherwise
+        just obtain a snapshot without advancing time.
+        """
         self.state_vars = self._sim.read_state() if drive else self._sim.get_state_snapshot()
         self.fuel_used = self._sim.fuel_used
         self.fuel_remaining = self._sim.fuel_remaining
 
     def _get_obs(self) -> np.ndarray:
+        """Return clipped numpy observation vector matching `OBS_KEYS`.
+
+        The last observation element is normalized remaining fuel in [0,1].
+        """
         obs = np.array(
             [self.state_vars[k] for k in self.OBS_KEYS if k != "fuel"] + [self.fuel_remaining / self.INITIAL_FUEL],
             dtype=np.float32,

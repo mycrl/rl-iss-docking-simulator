@@ -24,6 +24,12 @@ def evaluate(
     launch_browser: bool,
     headless: bool,
 ) -> None:
+    """Run the trained policy for `n_episodes` and print per-episode stats.
+
+    Loads the environment normalization statistics and the trained PPO model,
+    runs the policy deterministically, collects per-episode metrics and
+    prints a short summary at the end.
+    """
     env = EvalIssDockingEnv(launch_browser=launch_browser, headless=headless)
     stats_path = model_path + "_vec_normalize.pkl"
     vec_env = VecNormalize.load(stats_path, DummyVecEnv([lambda: env]))
@@ -77,6 +83,7 @@ def evaluate(
 
 
 def main() -> None:
+    """CLI entrypoint: parse evaluation options and run `evaluate`."""
     parser = argparse.ArgumentParser(
         description="Evaluate a trained PPO agent on the SpaceX ISS Docking Simulator.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
