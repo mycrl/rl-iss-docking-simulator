@@ -508,7 +508,7 @@ class SimulatorBrowser:
         launch: bool = False,
         headless: bool = False,
         cdp_url: str = CDP_URL,
-        page_load_timeout: float = 30.0,
+        page_load_timeout: float = 60.0,
         shared_launch: bool = False,
         expected_shared_tabs: int | None = None,
     ) -> None:
