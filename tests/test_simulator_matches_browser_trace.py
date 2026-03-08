@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from environments.evaluate.environment import EvalIssDockingEnv
+from environments.evaluate.browser import SimulatorBrowser
 from environments.train.simulator import TrainDockingSimulator
 
 
@@ -27,23 +27,7 @@ OBS_KEYS = [
     "rate",
     "pitch",
     "pitch_rate",
-    "fuel",
 ]
-
-TOLERANCES = {
-    "x": 20.0,
-    "y": 20.0,
-    "z": 20.0,
-    "roll": 12.0,
-    "pitch": 12.0,
-    "yaw": 12.0,
-    "roll_rate": 1.2,
-    "pitch_rate": 1.2,
-    "yaw_rate": 1.2,
-    "range": 25.0,
-    "rate": 0.4,
-    "fuel": 0.05,
-}
 
 
 class TestSimulatorMatchesBrowserTrace(unittest.TestCase):
@@ -53,36 +37,20 @@ class TestSimulatorMatchesBrowserTrace(unittest.TestCase):
         rng = np.random.default_rng(20260307)
 
         sim = TrainDockingSimulator(dt=dt)
-        env = None
+        browser = None
+
         try:
-            env = EvalIssDockingEnv(
-                launch_browser=True,
+            browser = SimulatorBrowser(
+                launch=True,
                 headless=True,
-                step_delay=dt,
-                reset_wait=3.0,
-                max_steps=compare_steps + 2,
             )
-            obs, _ = env.reset(seed=42)
+
+            browser.connect()
         except Exception as exc:
             self.skipTest(f"Live browser comparison unavailable: {exc}")
 
-        initial_state = dict(zip(OBS_KEYS, obs.tolist()))
-        sim.set_observable_state(
-            {
-                "x": float(initial_state["x"]),
-                "y": float(initial_state["y"]),
-                "z": float(initial_state["z"]),
-                "roll": float(initial_state["roll"]),
-                "roll_rate": float(initial_state["roll_rate"]),
-                "range": float(initial_state["range"]),
-                "yaw": float(initial_state["yaw"]),
-                "yaw_rate": float(initial_state["yaw_rate"]),
-                "rate": float(initial_state["rate"]),
-                "pitch": float(initial_state["pitch"]),
-                "pitch_rate": float(initial_state["pitch_rate"]),
-            },
-            fuel_remaining=float(initial_state["fuel"]) * sim.INITIAL_FUEL,
-        )
+        initial_state = browser.read_state()
+        sim.set_observable_state(initial_state)
 
         try:
             for step in range(compare_steps):
@@ -92,40 +60,21 @@ class TestSimulatorMatchesBrowserTrace(unittest.TestCase):
                 action[dim] = act_val
 
                 sim.click_action(ACTION_MAP[dim][act_val])
-                _, _, terminated, truncated, info = env.step(action)
+                browser.click_action(ACTION_MAP[dim][act_val])
+                
                 sim_state = sim.read_state()
-
-                sim_obs = dict(sim_state)
-                sim_obs["fuel"] = sim.fuel_remaining / sim.INITIAL_FUEL
-
-                browser_state = {
-                    "x": float(info["x"]),
-                    "y": float(info["y"]),
-                    "z": float(info["z"]),
-                    "roll": float(info["roll"]),
-                    "roll_rate": float(info["roll_rate"]),
-                    "range": float(info["range"]),
-                    "yaw": float(info["yaw"]),
-                    "yaw_rate": float(info["yaw_rate"]),
-                    "rate": float(info["rate"]),
-                    "pitch": float(info["pitch"]),
-                    "pitch_rate": float(info["pitch_rate"]),
-                    "fuel": float(info["fuel_remaining"]) / sim.INITIAL_FUEL,
-                }
+                browser_state = browser.read_state()
 
                 for key in OBS_KEYS:
                     self.assertAlmostEqual(
-                        float(sim_obs[key]),
+                        float(sim_state[key]),
                         float(browser_state[key]),
-                        delta=float(TOLERANCES[key]),
+                        delta=0.0,
                         msg=f"step={step} key={key} action_dim={dim} action_val={act_val}",
                     )
-
-                if terminated or truncated:
-                    break
         finally:
-            if env is not None:
-                env.close()
+            if browser is not None:
+                browser.disconnect()
 
 
 if __name__ == "__main__":
