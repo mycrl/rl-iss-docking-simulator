@@ -256,7 +256,7 @@ class TrainDockingSimulator:
         self.state_vars["y"] += self.state_vars["vy"] * self.dt
         self.state_vars["z"] += self.state_vars["vz"] * self.dt
 
-        self.state_vars["roll"] += self.state_vars["roll_rate"] * self.dt
+        self.state_vars["roll"] -= self.state_vars["roll_rate"] * self.dt
         self.state_vars["pitch"] -= self.state_vars["pitch_rate"] * self.dt
         self.state_vars["yaw"] -= self.state_vars["yaw_rate"] * self.dt
 

@@ -151,7 +151,7 @@ class EvalIssDockingEnv(gym.Env):
             success = True
         elif self.fuel_remaining <= 0.0:
             terminated = True
-        elif state["rate"] > 0.8:
+        elif abs(state["rate"]) > 0.8:
             terminated = True
         elif current_range > self.MAX_RANGE:
             terminated = True
@@ -206,7 +206,7 @@ class EvalIssDockingEnv(gym.Env):
             and abs(state["roll_rate"]) <= EvalIssDockingEnv.GOOD_ANG_RATE_THRESHOLD
             and abs(state["pitch_rate"]) <= EvalIssDockingEnv.GOOD_ANG_RATE_THRESHOLD
             and abs(state["yaw_rate"]) <= EvalIssDockingEnv.GOOD_ANG_RATE_THRESHOLD
-            and 0.0 <= state["rate"] <= EvalIssDockingEnv.MAX_SAFE_RATE
+            and -EvalIssDockingEnv.MAX_SAFE_RATE <= state["rate"] <= 0.0
             and state["range"] < EvalIssDockingEnv.GOOD_RANGE_THRESHOLD
         )
 

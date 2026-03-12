@@ -47,8 +47,8 @@ class TrainIssDockingEnv(gym.Env):
     GOOD_RANGE_THRESHOLD: float = 2.0
     MAX_RANGE: float = 350.0   # metres
     MAX_ATTITUDE: float = 30.0   # degrees
-    MIN_SAFE_RATE: float = 0.02  # m/s
-    MAX_SAFE_RATE: float = 0.2   # m/s
+    MIN_SAFE_RATE: float = 0.1  # m/s (closing speed magnitude)
+    MAX_SAFE_RATE: float = 0.25   # m/s (closing speed magnitude)
     NEAR_DISTANCE: float = 5.0   # metres
     ATTITUDE_KEYS: tuple[str, ...] = ("roll", "yaw", "pitch")
     ACTION_MAP: dict[int, dict[int, str]] = {
@@ -61,6 +61,16 @@ class TrainIssDockingEnv(gym.Env):
     }
     TRANSLATION_QUICK_REPEAT_PENALTY: float = 0.12
     TRANSLATION_DIRECTION_FLIP_PENALTY: float = 0.16
+    TRANSLATION_IDLE_BASE_PENALTY: float = 0.05
+    TRANSLATION_IDLE_VIOLATION_GAIN: float = 0.015
+    TRANSLATION_STAGNATION_EPS: float = 1e-4
+    TRANSLATION_WORSEN_GAIN: float = 0.5
+    LATERAL_CORRECTION_REWARD_GAIN: float = 0.03
+    LATERAL_CORRECTION_REWARD_MAX: float = 0.45
+    LATERAL_WRONG_DIRECTION_GAIN: float = 0.04
+    LATERAL_WRONG_DIRECTION_MAX: float = 0.6
+    LATERAL_IDLE_WORSEN_GAIN: float = 0.05
+    LATERAL_IDLE_WORSEN_MAX: float = 0.7
     METRIC_REWARD_WEIGHTS: dict[str, float] = {
         "x": 0.9,
         "y": 0.9,
@@ -154,13 +164,24 @@ class TrainIssDockingEnv(gym.Env):
 
         # 1. Action/Fuel penalty (per control dimension)
         for dim in active_dims:
-            self._add_reward_component(reward_components, f"fuel_dim_{dim}", -0.03)
+            dim_penalty = -0.015 if dim < 3 else -0.03
+            self._add_reward_component(reward_components, f"fuel_dim_{dim}", dim_penalty)
 
+        translation_metric_by_dim: dict[int, str] = {0: "x", 1: "z", 2: "y"}
         for dim in sorted(quick_repeat_translation_dims):
+            metric = translation_metric_by_dim.get(dim)
+            quick_repeat_penalty = self.TRANSLATION_QUICK_REPEAT_PENALTY
+            if metric is not None:
+                violation = self._metric_violation(metric, state)
+                improvement = self._metric_improvement(metric, self._prev_state, state)
+                if violation > 1.0 and improvement <= 0.0:
+                    quick_repeat_penalty *= 0.25
+                elif violation > 0.5 and improvement <= 0.0:
+                    quick_repeat_penalty *= 0.5
             self._add_reward_component(
                 reward_components,
                 f"translation_quick_repeat_dim{dim}",
-                -self.TRANSLATION_QUICK_REPEAT_PENALTY,
+                -quick_repeat_penalty,
             )
 
         for dim in sorted(flip_translation_dims):
@@ -173,11 +194,14 @@ class TrainIssDockingEnv(gym.Env):
         progress_component_scores: dict[str, float] = {}
         noop_component_scores: dict[str, float] = {}
 
-        # Local per-dimension credit: each action only affects its own mapped metrics.
+        # Local per-dimension credit: keep translation axes decoupled.
+        # - Forward/backward controls the approach channel (x/rate)
+        # - Up/down controls z only
+        # - Left/right controls y only
         dim_to_metrics: dict[int, tuple[str, ...]] = {
-            0: ("range", "rate"),
+            0: ("x", "rate"),
             1: ("z",),
-            2: ("y", "x"),
+            2: ("y",),
             3: ("roll", "roll_rate"),
             4: ("pitch", "pitch_rate"),
             5: ("yaw", "yaw_rate"),
@@ -239,6 +263,7 @@ class TrainIssDockingEnv(gym.Env):
                         <= self._sim.TRANSLATION_OBSERVE_WINDOW_STEPS
                     )
                     if improvement > 0.0:
+                        # State is improving: sustained noop should be rewarded.
                         hold_reward = float(np.clip(improvement * 0.5, 0.0, 0.25))
                         noop_component_scores[f"dim{dim}_{metric}"] = hold_reward
                         self._add_reward_component(
@@ -264,46 +289,137 @@ class TrainIssDockingEnv(gym.Env):
                             lazy_penalty,
                         )
 
+        # Directional shaping for lateral translation axes.
+        # Encourage explicit corrective action when y/z drift away from zero.
+        lateral_axis: tuple[tuple[int, str], ...] = ((1, "z"), (2, "y"))
+        for dim, metric in lateral_axis:
+            pos = float(state[metric])
+            prev_pos = float(self._prev_state[metric])
+            act_val = int(action[dim])
+
+            violation = max(0.0, abs(pos) - self.GOOD_POS_THRESHOLD)
+            if violation <= 0.0:
+                continue
+
+            # If the sign is negative we need action=1 (up/right), else action=2.
+            desired_action = 1 if pos < 0.0 else 2
+            drift = pos - prev_pos
+            moving_away = (pos * drift) > 0.0
+
+            if act_val in (1, 2):
+                if act_val == desired_action:
+                    correction_reward = float(
+                        np.clip(
+                            violation * self.LATERAL_CORRECTION_REWARD_GAIN
+                            + (0.12 if moving_away else 0.0),
+                            0.0,
+                            self.LATERAL_CORRECTION_REWARD_MAX,
+                        )
+                    )
+                    self._add_reward_component(
+                        reward_components,
+                        f"lateral_correct_dim{dim}_{metric}",
+                        correction_reward,
+                    )
+                else:
+                    wrong_penalty = -float(
+                        np.clip(
+                            violation * self.LATERAL_WRONG_DIRECTION_GAIN
+                            + (0.15 if moving_away else 0.0),
+                            0.0,
+                            self.LATERAL_WRONG_DIRECTION_MAX,
+                        )
+                    )
+                    self._add_reward_component(
+                        reward_components,
+                        f"lateral_wrong_dim{dim}_{metric}",
+                        wrong_penalty,
+                    )
+            elif moving_away:
+                idle_worsen_penalty = -float(
+                    np.clip(
+                        violation * self.LATERAL_IDLE_WORSEN_GAIN + abs(drift) * 0.6,
+                        0.0,
+                        self.LATERAL_IDLE_WORSEN_MAX,
+                    )
+                )
+                self._add_reward_component(
+                    reward_components,
+                    f"lateral_idle_worsen_dim{dim}_{metric}",
+                    idle_worsen_penalty,
+                )
+
+        # Penalize translation-noop only when translation state stagnates or worsens.
+        translation_active = any(int(action[d]) in (1, 2) for d in range(3))
+        if not translation_active:
+            translation_violation = (
+                max(0.0, abs(state["x"]) - self.GOOD_POS_THRESHOLD)
+                + max(0.0, abs(state["y"]) - self.GOOD_POS_THRESHOLD)
+                + max(0.0, abs(state["z"]) - self.GOOD_POS_THRESHOLD)
+            )
+            translation_progress = (
+                self._metric_improvement("x", self._prev_state, state)
+                + self._metric_improvement("y", self._prev_state, state)
+                + self._metric_improvement("z", self._prev_state, state)
+            )
+            if (
+                translation_violation > 0.0
+                and translation_progress <= self.TRANSLATION_STAGNATION_EPS
+            ):
+                worsen_amount = max(0.0, -translation_progress)
+                idle_penalty = -float(
+                    np.clip(
+                        self.TRANSLATION_IDLE_BASE_PENALTY
+                        + translation_violation * self.TRANSLATION_IDLE_VIOLATION_GAIN
+                        +
+                        worsen_amount * self.TRANSLATION_WORSEN_GAIN,
+                        self.TRANSLATION_IDLE_BASE_PENALTY,
+                        0.6,
+                    )
+                )
+                self._add_reward_component(
+                    reward_components,
+                    "translation_idle",
+                    idle_penalty,
+                )
+
         # 4. Safety Constraints & Violations (Extreme Penalties)
         current_range = state["range"]
-        if current_range < self.NEAR_DISTANCE and state["rate"] > self.MAX_SAFE_RATE:
+        if current_range < self.NEAR_DISTANCE and state["rate"] < -self.MAX_SAFE_RATE:
             self._add_reward_component(reward_components, "near_overspeed", -10.0)
 
         # Global approach-rate safety shaping: regardless of distance, heavily
         # discourage unsafe closing speed beyond configured limit.
-        # Per requested rule: rate can be negative physically, but negative means backing away and is penalized.
-        # Important: negative `rate` indicates the vehicle is moving away
-        # from the docking port (backing off). This is strongly penalised
-        # because the task requires closing to dock. The penalty grows
-        # quadratically to heavily discourage policies that back away.
-        if state["rate"] < 0.0:
-            reverse_speed = -state["rate"]
+        # In this simulator, `rate = d(range)/dt`.
+        # Therefore: `rate < 0` means closing in, `rate > 0` means drifting away.
+        if state["rate"] > 0.0:
+            recede_speed = state["rate"]
             self._add_reward_component(
                 reward_components,
-                "rate_reverse",
-                -((reverse_speed) * 30.0) ** 2,
+                "rate_recede",
+                -((recede_speed) * 30.0) ** 2,
             )
-        elif state["rate"] < self.MIN_SAFE_RATE:
-            under_speed = self.MIN_SAFE_RATE - state["rate"]
+        elif state["rate"] > -self.MIN_SAFE_RATE:
+            under_speed = self.MIN_SAFE_RATE - (-state["rate"])
             self._add_reward_component(
                 reward_components,
                 "rate_under",
                 -((under_speed) * 20.0) ** 2,
             )
-        elif state["rate"] > self.MAX_SAFE_RATE:
-            overspeed = state["rate"] - self.MAX_SAFE_RATE
+        elif state["rate"] < -self.MAX_SAFE_RATE:
+            overspeed = (-state["rate"]) - self.MAX_SAFE_RATE
             self._add_reward_component(
                 reward_components,
                 "rate_overspeed",
                 -((overspeed) * 30.0) ** 2,
             )
 
-        if current_range > 15.0 and 0.0 <= state["rate"] < self.MIN_SAFE_RATE:
+        if current_range > 15.0 and -self.MIN_SAFE_RATE < state["rate"] <= 0.0:
             self._add_reward_component(reward_components, "far_stagnation", -0.1)
 
         # c) Angular-rate target-band shaping (per-axis, no global coupling).
         axis_to_rate = {
-            "roll": ("roll_rate", -0.02),
+            "roll": ("roll_rate", 0.02),
             "pitch": ("pitch_rate", 0.02),
             "yaw": ("yaw_rate", 0.02),
         }
@@ -336,7 +452,7 @@ class TrainIssDockingEnv(gym.Env):
         elif self.fuel_remaining <= 0.0:
             self._add_reward_component(reward_components, "terminal_fuel_empty", -300.0)
             terminated = True
-        elif state["rate"] > 0.8:
+        elif abs(state["rate"]) > 0.8:
             self._add_reward_component(reward_components, "terminal_rate_overspeed", -500.0)
             terminated = True
         elif current_range > self.MAX_RANGE:
@@ -407,7 +523,8 @@ class TrainIssDockingEnv(gym.Env):
         if key == "range":
             return max(0.0, state["range"] - self.GOOD_RANGE_THRESHOLD)
         if key == "rate":
-            return max(0.0, self.MIN_SAFE_RATE - state["rate"]) + max(0.0, state["rate"] - self.MAX_SAFE_RATE)
+            closing_speed = -state["rate"]
+            return max(0.0, self.MIN_SAFE_RATE - closing_speed) + max(0.0, closing_speed - self.MAX_SAFE_RATE)
         return 0.0
 
     def _metric_improvement(
@@ -434,7 +551,7 @@ class TrainIssDockingEnv(gym.Env):
             and abs(state["roll_rate"]) <= TrainIssDockingEnv.GOOD_ANG_RATE_THRESHOLD
             and abs(state["pitch_rate"]) <= TrainIssDockingEnv.GOOD_ANG_RATE_THRESHOLD
             and abs(state["yaw_rate"]) <= TrainIssDockingEnv.GOOD_ANG_RATE_THRESHOLD
-            and TrainIssDockingEnv.MIN_SAFE_RATE <= state["rate"] <= TrainIssDockingEnv.MAX_SAFE_RATE
+            and -TrainIssDockingEnv.MAX_SAFE_RATE <= state["rate"] <= -TrainIssDockingEnv.MIN_SAFE_RATE
             and state["range"] < TrainIssDockingEnv.GOOD_RANGE_THRESHOLD
         )
 

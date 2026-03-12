@@ -47,11 +47,11 @@ Common thresholds used by both environments:
 	- `|x|,|y|,|z| <= 0.2`
 	- `|roll|,|pitch|,|yaw| <= 0.2`
 	- `|roll_rate|,|pitch_rate|,|yaw_rate| <= 0.25`
-	- `0.0 <= rate <= 0.2`
+	- `-0.25 <= rate <= -0.1` (negative means closing)
 	- `range < 2.0`
 - Failure:
 	- fuel exhausted
-	- `rate > 0.8`
+	- `|rate| > 0.8`
 	- `range > 350`
 	- any of `|roll|,|pitch|,|yaw| > 30`
 - Truncation:
@@ -84,11 +84,11 @@ Final reward is the sum of these components:
 	- lazy penalty on violation without improvement:
 		`-clip((violation + (-improvement)) * 0.35, 0.0, 0.25)`
 - Safety shaping:
-	- near overspeed (`range < 5` and `rate > 0.2`): `-10`
-	- reverse rate (`rate < 0`): `-(((-rate) * 30)^2)`
-	- under-speed (`0 <= rate < 0.02`): `-(((0.02-rate) * 20)^2)`
-	- over-speed (`rate > 0.2`): `-(((rate-0.2) * 30)^2)`
-	- far stagnation (`range > 15` and `0 <= rate < 0.02`): `-0.1`
+	- near overspeed (`range < 5` and `rate < -0.25`): `-10`
+	- receding (`rate > 0`): `-((rate * 30)^2)`
+	- under-speed (`-0.1 < rate <= 0`): `-(((0.1-(-rate)) * 20)^2)`
+	- over-speed (`rate < -0.25`): `-((((-rate)-0.25) * 30)^2)`
+	- far stagnation (`range > 15` and `-0.1 < rate <= 0`): `-0.1`
 	- angular target band:
 		- per axis target rate from attitude:
 			- roll target = `clip(roll * -0.02, -0.25, 0.25)`
@@ -99,7 +99,7 @@ Final reward is the sum of these components:
 - Terminal rewards/penalties:
 	- success: `+1000`
 	- fuel empty: `-300`
-	- terminal overspeed (`rate > 0.8`): `-500`
+	- terminal overspeed (`|rate| > 0.8`): `-500`
 	- out of range (`range > 350`): `-1000`
 	- attitude limit (`|roll|` or `|pitch|` or `|yaw| > 30`): `-1000`
 

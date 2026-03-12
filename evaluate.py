@@ -42,15 +42,19 @@ def evaluate(
     final_rates: list[float] = []
     episode_steps: list[int] = []
     episode_fuel_used: list[int] = []
+    episode_mean_noop_ratio: list[float] = []
     successes = 0
 
     for episode in range(n_episodes):
         obs = vec_env.reset()
         done = False
         info = {}
+        action_counts = np.zeros((6, 3), dtype=np.int32)
 
         while not done:
             action, _ = model.predict(obs, deterministic=True) # pyright: ignore[reportArgumentType]
+            for dim in range(6):
+                action_counts[dim, int(action[0][dim])] += 1
             obs, _rewards, dones, infos = vec_env.step(action)
             done = dones[0]
             info = infos[0]
@@ -59,6 +63,9 @@ def evaluate(
         final_rates.append(float(info.get("rate", 0.0)))
         episode_steps.append(int(info.get("steps", 0)))
         episode_fuel_used.append(int(info.get("fuel_used", 0)))
+        dim_noop_ratio = action_counts[:, 0] / np.clip(action_counts.sum(axis=1), 1, None)
+        mean_noop_ratio = float(np.mean(dim_noop_ratio))
+        episode_mean_noop_ratio.append(mean_noop_ratio)
         if info.get("success", False):
             successes += 1
 
@@ -68,7 +75,8 @@ def evaluate(
             f"range={info.get('range', 0.0):.2f} m  "
             f"rate={info.get('rate', 0.0):.3f} m/s  "
             f"steps={info.get('steps', 0):4d}  "
-            f"fuel_used={info.get('fuel_used', 0):4d}"
+            f"fuel_used={info.get('fuel_used', 0):4d}  "
+            f"mean_noop={mean_noop_ratio:.3f}"
         )
 
     vec_env.close()
@@ -80,6 +88,9 @@ def evaluate(
     print(f"Mean rate    : {np.mean(final_rates):.3f} m/s")
     print(f"Mean steps   : {np.mean(episode_steps):.1f}")
     print(f"Mean fuel    : {np.mean(episode_fuel_used):.1f}")
+    print(f"Mean noop    : {np.mean(episode_mean_noop_ratio):.3f}")
+    if np.mean(episode_mean_noop_ratio) > 0.95:
+        print("Warning: policy is near-noop. Retrain with updated reward shaping.")
 
 
 def main() -> None:
